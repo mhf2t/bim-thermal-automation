@@ -1,15 +1,16 @@
 # ifc_parser.py
 # ============================================================
-# IFC → Thermal Envelope Parser (Research Version)
-# - Robust: never silently returns None
-# - Always returns a dict with keys: ifc_schema, summary, walls, windows, roofs
-# - If something fails, raises a RuntimeError with details
+# IFC Thermal Parser — robust + never returns None
+# - Extracts walls, roofs, windows
+# - Computes U-values using ISO 6946 from material layers
+# - Uses thermal database CSV for lambda (conductivity)
 # ============================================================
 
 from __future__ import annotations
 
 import os
 import re
+import math
 from typing import Dict, Any, List, Optional, Tuple
 
 import pandas as pd
@@ -18,18 +19,37 @@ try:
     import ifcopenshell
     import ifcopenshell.util.element as ifc_el
 except Exception as e:
-    raise ImportError(
-        "ifcopenshell is required. Install it in your environment / requirements.txt.\n"
-        f"Import error: {e}"
-    )
+    raise ImportError("ifcopenshell is required. Add it to requirements and ensure it installs.") from e
 
 
 # ----------------------------
-# Constants (ISO 6946)
+# Helpers
 # ----------------------------
-R_SI = 0.13  # internal surface resistance (m²K/W)
-R_SO = 0.04  # external surface resistance (m²K/W)
-DEFAULT_LAMBDA = 0.50  # W/mK fallback if material not found
+_WS_RE = re.compile(r"\s+")
+
+
+def _norm_key(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace("_", " ").replace("-", " ")
+    s = _WS_RE.sub(" ", s)
+    return s
+
+
+def _safe_float(x, default=None):
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def _mm_to_m(mm: float) -> float:
+    return float(mm) / 1000.0
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
 
 
 # ----------------------------
@@ -39,16 +59,19 @@ def load_thermal_database(csv_path: str) -> pd.DataFrame:
     """
     Expected minimal columns (case-insensitive):
       - material (or material_name / name)
-      - lambda   (or conductivity / k)
+      - lambda   (or conductivity / k / lambda_value)
+
     Optional:
       - cost_index (any scale)
+
+    Your file has: ['material_name', 'lambda_value', 'description', 'category']
+    ✅ This loader supports that.
     """
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Thermal database CSV not found: {csv_path}")
 
     df = pd.read_csv(csv_path)
 
-    # normalize columns
     cols = {c.lower().strip(): c for c in df.columns}
     name_col = None
     lam_col = None
@@ -58,14 +81,10 @@ def load_thermal_database(csv_path: str) -> pd.DataFrame:
             name_col = cols[candidate]
             break
 
-    for candidate in [
-    "lambda", "lambda_value",
-    "conductivity", "k", "k_value",
-    "thermal_conductivity", "thermal_conductivity_wmk", "thermal_conductivity_w_mk"
-]:
-    if candidate in cols:
-        lam_col = cols[candidate]
-        break
+    for candidate in ["lambda", "lambda_value", "conductivity", "k"]:
+        if candidate in cols:
+            lam_col = cols[candidate]
+            break
 
     if not name_col or not lam_col:
         raise ValueError(
@@ -86,598 +105,368 @@ def load_thermal_database(csv_path: str) -> pd.DataFrame:
             break
     out["__cost__"] = pd.to_numeric(out[cost_col], errors="coerce") if cost_col else None
 
-    # drop rows without valid lambda
+    # keep only rows with lambda
     out = out[out["__lambda__"].notna()].reset_index(drop=True)
+
+    if out.empty:
+        raise ValueError("Thermal DB loaded, but no valid lambda values were found after cleaning.")
+
     return out
 
 
+def _match_lambda(material_name: str, db: pd.DataFrame) -> Tuple[Optional[float], str, str]:
+    """
+    Returns (lambda, matched_material_name, confidence)
+    confidence in {"high","medium","low"}
+    """
+    key = _norm_key(material_name)
+    if not key:
+        return None, "—", "low"
+
+    # exact key match
+    hit = db[db["__mat_key__"] == key]
+    if not hit.empty:
+        row = hit.iloc[0]
+        return float(row["__lambda__"]), str(row["__mat_name__"]), "high"
+
+    # contains / partial match
+    # try: db key contained in material key or vice versa
+    # Keep it simple and deterministic (first best length match)
+    candidates = []
+    for _, r in db.iterrows():
+        dk = r["__mat_key__"]
+        if not dk:
+            continue
+        if dk in key or key in dk:
+            candidates.append((len(dk), r))
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        r = candidates[0][1]
+        return float(r["__lambda__"]), str(r["__mat_name__"]), "medium"
+
+    return None, "—", "low"
+
+
 # ----------------------------
-# Main parser
+# ISO 6946 calculations
+# ----------------------------
+def _u_value_from_layers(layers: List[Dict[str, Any]], r_si: float = 0.13, r_so: float = 0.04) -> Tuple[Optional[float], float]:
+    """
+    layers: list of dicts with thickness_mm and lambda
+    Returns (U, R_total)
+    """
+    r_sum = 0.0
+    for layer in layers:
+        th_mm = _safe_float(layer.get("thickness_mm"), 0.0) or 0.0
+        lam = _safe_float(layer.get("lambda"), None)
+        if th_mm <= 0 or lam is None or lam <= 0:
+            continue
+        r_sum += _mm_to_m(th_mm) / lam
+
+    r_total = r_si + r_sum + r_so
+    if r_total <= 0:
+        return None, r_total
+    u = 1.0 / r_total
+    return float(u), float(r_total)
+
+
+# ----------------------------
+# IFC extraction helpers
+# ----------------------------
+def _get_pset_value(elem, pset_name: str, prop_name: str):
+    """
+    Safe read property from pset using ifcopenshell.util.element.get_psets
+    """
+    try:
+        psets = ifc_el.get_psets(elem) or {}
+        pset = psets.get(pset_name) or {}
+        val = pset.get(prop_name)
+        return val
+    except Exception:
+        return None
+
+
+def _get_global_id(elem) -> str:
+    try:
+        return str(getattr(elem, "GlobalId", "") or "")
+    except Exception:
+        return ""
+
+
+def _get_name(elem) -> str:
+    try:
+        return str(getattr(elem, "Name", "") or "") or str(getattr(elem, "ObjectType", "") or "")
+    except Exception:
+        return ""
+
+
+def _extract_layer_set_from_elem(ifc_file, elem) -> List[Tuple[str, float]]:
+    """
+    Attempt to extract (material_name, thickness_mm) from:
+      - IfcMaterialLayerSetUsage -> ForLayerSet -> MaterialLayers
+      - IfcMaterialLayerSet
+    If not found, returns [].
+    """
+    layers_out: List[Tuple[str, float]] = []
+
+    try:
+        assoc = getattr(elem, "HasAssociations", None) or []
+        for rel in assoc:
+            if not rel or not rel.is_a("IfcRelAssociatesMaterial"):
+                continue
+            mat = rel.RelatingMaterial
+            if mat is None:
+                continue
+
+            # IfcMaterialLayerSetUsage
+            if mat.is_a("IfcMaterialLayerSetUsage"):
+                ls = mat.ForLayerSet
+                if ls and hasattr(ls, "MaterialLayers"):
+                    for ml in ls.MaterialLayers:
+                        mname = ""
+                        if ml.Material:
+                            mname = str(getattr(ml.Material, "Name", "") or "")
+                        th = _safe_float(getattr(ml, "LayerThickness", None), 0.0) or 0.0
+                        # IFC thickness usually meters; convert to mm if value seems small/large:
+                        # Heuristic: if <= 1.0 assume meters; convert to mm
+                        th_mm = th * 1000.0 if th <= 1.0 else th
+                        layers_out.append((mname, float(th_mm)))
+                break
+
+            # IfcMaterialLayerSet (sometimes directly)
+            if mat.is_a("IfcMaterialLayerSet"):
+                if hasattr(mat, "MaterialLayers"):
+                    for ml in mat.MaterialLayers:
+                        mname = ""
+                        if ml.Material:
+                            mname = str(getattr(ml.Material, "Name", "") or "")
+                        th = _safe_float(getattr(ml, "LayerThickness", None), 0.0) or 0.0
+                        th_mm = th * 1000.0 if th <= 1.0 else th
+                        layers_out.append((mname, float(th_mm)))
+                break
+
+    except Exception:
+        return []
+
+    # remove empties
+    layers_out = [(n.strip(), t) for n, t in layers_out if (n or "").strip() and t and t > 0]
+    return layers_out
+
+
+def _extract_area_m2(elem) -> Optional[float]:
+    """
+    Try to read base quantities if available.
+    In Revit IFC exports, wall area may appear under Qto_WallBaseQuantities / NetSideArea or GrossSideArea.
+    """
+    # common quantity names
+    for pset, prop in [
+        ("Qto_WallBaseQuantities", "NetSideArea"),
+        ("Qto_WallBaseQuantities", "GrossSideArea"),
+        ("Qto_RoofBaseQuantities", "NetArea"),
+        ("Qto_RoofBaseQuantities", "GrossArea"),
+        ("Qto_WindowBaseQuantities", "Area"),
+    ]:
+        v = _get_pset_value(elem, pset, prop)
+        fv = _safe_float(v, None)
+        if fv and fv > 0:
+            return float(fv)
+
+    return None
+
+
+def _guess_orientation_from_pset(elem) -> str:
+    """
+    Many exports don’t include orientation. If you already compute it elsewhere, keep it there.
+    Here we only attempt a safe read; else return "Unknown".
+    """
+    for pset, prop in [
+        ("Pset_WallCommon", "Orientation"),
+        ("Pset_BuildingElementProxyCommon", "Orientation"),
+    ]:
+        v = _get_pset_value(elem, pset, prop)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+    return "Unknown"
+
+
+# ----------------------------
+# Main parse function
 # ----------------------------
 def parse_ifc(ifc_path: str, thermal_db: pd.DataFrame) -> Dict[str, Any]:
     """
-    Returns:
-      {
-        "ifc_schema": "IFC4",
-        "summary": {...},
-        "walls":   [ ... ],
-        "windows": [ ... ],
-        "roofs":   [ ... ],
-      }
+    Returns a dict with keys:
+      - ifc_schema
+      - summary
+      - walls, roofs, windows
+    Never returns None. Raises RuntimeError on fatal open/parse issues.
     """
+    if not os.path.exists(ifc_path):
+        raise RuntimeError(f"IFC file not found: {ifc_path}")
+
     try:
-        if not os.path.exists(ifc_path):
-            raise FileNotFoundError(f"IFC file not found: {ifc_path}")
-
-        model = ifcopenshell.open(ifc_path)
-        if model is None:
-            raise RuntimeError("ifcopenshell.open() returned None (invalid IFC or missing ifcopenshell build).")
-
-        schema = getattr(model, "schema", None) or getattr(model, "schema_identifier", None) or "UNKNOWN"
-
-        walls = _extract_walls(model, thermal_db)
-        roofs = _extract_roofs(model, thermal_db)
-        windows = _extract_windows(model)
-
-        # --- summary numbers ---
-        total_wall_area = sum(float(w.get("area_m2") or 0) for w in walls)
-        total_win_area = sum(float(w.get("area_m2") or 0) for w in windows)
-
-        overall_wwr = (total_win_area / total_wall_area * 100.0) if total_wall_area > 0 else 0.0
-
-        summary = {
-            "total_external_walls": int(len(walls)),
-            "total_windows": int(len(windows)),
-            "total_roofs": int(len(roofs)),
-            "total_wall_area_m2": float(total_wall_area),
-            "total_window_area_m2": float(total_win_area),
-            "overall_wwr_pct": float(round(overall_wwr, 3)),
-            # optional convenience
-            "notes": "Areas are derived from IFC quantities when available; fallback may be 0 if not present."
-        }
-
-        # Ensure the app-required keys exist
-        out = {
-            "ifc_schema": schema,
-            "summary": summary,
-            "walls": walls,
-            "windows": windows,
-            "roofs": roofs,
-        }
-
-        _hard_guard_return(out)
-        return out
-
+        ifc = ifcopenshell.open(ifc_path)
     except Exception as e:
-        # IMPORTANT: never return None silently
-        raise RuntimeError(f"parse_ifc failed: {e}")
+        raise RuntimeError(f"Could not open IFC: {e}") from e
 
+    try:
+        schema = str(getattr(ifc, "schema", None) or "Unknown")
+    except Exception:
+        schema = "Unknown"
 
-# ============================================================
-# Extraction helpers
-# ============================================================
+    walls: List[Dict[str, Any]] = []
+    roofs: List[Dict[str, Any]] = []
+    windows: List[Dict[str, Any]] = []
 
-def _extract_walls(model, thermal_db: pd.DataFrame) -> List[Dict[str, Any]]:
-    walls_out: List[Dict[str, Any]] = []
+    # --------
+    # Walls
+    # --------
+    try:
+        ifc_walls = (ifc.by_type("IfcWall") or []) + (ifc.by_type("IfcWallStandardCase") or [])
+    except Exception:
+        ifc_walls = []
 
-    # IFC walls can be IfcWall / IfcWallStandardCase
-    walls = []
-    for t in ["IfcWall", "IfcWallStandardCase"]:
-        try:
-            walls += model.by_type(t) or []
-        except Exception:
-            pass
+    for w in ifc_walls:
+        gid = _get_global_id(w)
+        name = _get_name(w) or f"Wall_{gid[:8] if gid else 'Unknown'}"
 
-    for el in walls:
-        try:
-            gid = getattr(el, "GlobalId", None) or ""
-            name = (getattr(el, "Name", None) or "Wall").strip()
+        layer_pairs = _extract_layer_set_from_elem(ifc, w)
+        layers = []
+        total_th = 0.0
 
-            area = _get_area_m2(el, prefer=("NetSideArea", "GrossSideArea", "Area"))
-            orientation = _get_orientation_label(el)
+        for mat_name, th_mm in layer_pairs:
+            lam, matched, conf = _match_lambda(mat_name, thermal_db)
+            if lam is None:
+                # fallback lambda (your earlier logic used 0.50) — keep consistent
+                lam = 0.50
+                conf = "low"
+                matched = "DEFAULT(0.50)"
 
-            layers, total_thk_mm, conf_counts = _get_layers_with_lambda(el, thermal_db)
-            u_value = _calc_u_value(layers)
-
-            walls_out.append({
-                "id": gid,
-                "name": name,
-                "orientation": orientation,
-                "area_m2": float(area) if area is not None else 0.0,
-                "u_value": float(round(u_value, 4)) if u_value is not None else None,
-                "total_thickness_mm": float(round(total_thk_mm, 1)) if total_thk_mm is not None else None,
-                "layer_count": int(len(layers)),
-                "layers": layers,
-                # for transparency reporting
-                "confidence_counts": conf_counts,
+            r_val = (_mm_to_m(th_mm) / lam) if lam > 0 and th_mm > 0 else 0.0
+            layers.append({
+                "material_name": mat_name,
+                "matched_material": matched,
+                "confidence": conf,
+                "thickness_mm": float(th_mm),
+                "lambda": float(lam),
+                "r_value": float(r_val),
             })
-        except Exception as e:
-            # keep robust: skip element but do not crash whole parsing
-            # (still do not return None)
-            continue
+            total_th += float(th_mm)
 
-    return walls_out
+        u, rtot = _u_value_from_layers(layers)
 
+        area = _extract_area_m2(w)
+        orientation = _guess_orientation_from_pset(w)
 
-def _extract_roofs(model, thermal_db: pd.DataFrame) -> List[Dict[str, Any]]:
-    roofs_out: List[Dict[str, Any]] = []
-
-    roofs = []
-    for t in ["IfcRoof", "IfcSlab"]:
-        try:
-            roofs += model.by_type(t) or []
-        except Exception:
-            pass
-
-    # IfcSlab can include ROOF slabs. We filter if possible.
-    for el in roofs:
-        try:
-            if el.is_a("IfcSlab"):
-                # Try to detect roof slabs
-                # PredefinedType can be ROOF (depends on export)
-                pdt = getattr(el, "PredefinedType", None)
-                if pdt and str(pdt).upper() not in ["ROOF", "ROOFSLAB", "ROOF_SLAB"]:
-                    # many slabs are floors; skip unless clearly roof
-                    continue
-
-            gid = getattr(el, "GlobalId", None) or ""
-            name = (getattr(el, "Name", None) or el.is_a()).strip()
-
-            area = _get_area_m2(el, prefer=("NetArea", "GrossArea", "Area"))
-            layers, total_thk_mm, conf_counts = _get_layers_with_lambda(el, thermal_db)
-            u_value = _calc_u_value(layers)
-
-            roofs_out.append({
-                "id": gid,
-                "name": name,
-                "area_m2": float(area) if area is not None else 0.0,
-                "u_value": float(round(u_value, 4)) if u_value is not None else None,
-                "total_thickness_mm": float(round(total_thk_mm, 1)) if total_thk_mm is not None else None,
-                "layer_count": int(len(layers)),
-                "layers": layers,
-                "confidence_counts": conf_counts,
-            })
-        except Exception:
-            continue
-
-    return roofs_out
-
-
-def _extract_windows(model) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-
-    wins = []
-    for t in ["IfcWindow"]:
-        try:
-            wins += model.by_type(t) or []
-        except Exception:
-            pass
-
-    for el in wins:
-        try:
-            gid = getattr(el, "GlobalId", None) or ""
-            name = (getattr(el, "Name", None) or "Window").strip()
-
-            # Try to get psets
-            psets = _safe_get_psets(el)
-
-            u_value = _pset_get_float(psets, "Pset_WindowCommon", "ThermalTransmittance")
-            shgc = _pset_get_float(psets, "Pset_WindowCommon", "SolarHeatGainCoefficient")
-
-            # size / area (IFC quantities preferred)
-            area = _get_area_m2(el, prefer=("Area", "GrossArea", "NetArea"))
-            width = _pset_get_float(psets, "Pset_WindowCommon", "OverallWidth")
-            height = _pset_get_float(psets, "Pset_WindowCommon", "OverallHeight")
-
-            # Orientation: best-effort (host wall if we can find it; else try own placement)
-            orientation = _get_window_orientation_label(el) or _get_orientation_label(el)
-
-            out.append({
-                "id": gid,
-                "name": name,
-                "orientation": orientation,
-                "width_m": float(width) if width is not None else None,
-                "height_m": float(height) if height is not None else None,
-                "area_m2": float(area) if area is not None else 0.0,
-                "u_value": float(u_value) if u_value is not None else None,
-                "shgc": float(shgc) if shgc is not None else None,
-            })
-        except Exception:
-            continue
-
-    return out
-
-
-# ============================================================
-# Material / layers / U-value
-# ============================================================
-
-def _get_layers_with_lambda(el, thermal_db: pd.DataFrame) -> Tuple[List[Dict[str, Any]], float, Dict[str, int]]:
-    """
-    Returns (layers, total_thickness_mm, confidence_counts)
-    Each layer: material_name, thickness_mm, matched_material, lambda, confidence, r_value
-    """
-    layers_out: List[Dict[str, Any]] = []
-    total_thk_mm = 0.0
-
-    conf_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0, "TOTAL": 0}
-
-    mats = _safe_get_material(el)
-
-    # If material info is missing in IFC, return empty layers
-    if mats is None:
-        return [], 0.0, conf_counts
-
-    # Try to extract IfcMaterialLayerSetUsage → IfcMaterialLayerSet → MaterialLayers
-    raw_layers = _flatten_layers(mats)
-
-    for lay in raw_layers:
-        mat_name = (lay.get("material_name") or "Unknown").strip()
-        thk_mm = float(lay.get("thickness_mm") or 0.0)
-
-        matched, lam, conf = _match_lambda(mat_name, thermal_db)
-
-        # R = d/lambda
-        r_val = None
-        if lam and lam > 0 and thk_mm > 0:
-            r_val = (thk_mm / 1000.0) / lam
-
-        layers_out.append({
-            "material_name": mat_name,
-            "thickness_mm": thk_mm if thk_mm > 0 else None,
-            "matched_material": matched,
-            "lambda": float(round(lam, 4)) if lam is not None else None,
-            "confidence": conf,
-            "r_value": float(round(r_val, 6)) if r_val is not None else None,
+        walls.append({
+            "id": gid,
+            "name": name,
+            "orientation": orientation,
+            "area_m2": float(area) if area is not None else 0.0,
+            "layers": layers,
+            "layer_count": len(layers),
+            "total_thickness_mm": float(total_th) if total_th > 0 else 0.0,
+            "u_value": float(round(u, 4)) if u is not None else None,
         })
 
-        total_thk_mm += thk_mm
-        conf_counts["TOTAL"] += 1
-        conf_counts[conf] = conf_counts.get(conf, 0) + 1
-
-    return layers_out, total_thk_mm, conf_counts
-
-
-def _calc_u_value(layers: List[Dict[str, Any]]) -> Optional[float]:
-    """
-    ISO 6946: U = 1 / (Rsi + Σ(d/lambda) + Rso)
-    If no valid layer R-values exist, return None.
-    """
-    r_sum = 0.0
-    valid = 0
-    for l in layers:
-        rv = l.get("r_value")
-        if isinstance(rv, (int, float)) and rv > 0:
-            r_sum += float(rv)
-            valid += 1
-
-    if valid == 0:
-        return None
-
-    r_total = R_SI + r_sum + R_SO
-    if r_total <= 0:
-        return None
-    return 1.0 / r_total
-
-
-# ============================================================
-# Orientation / quantities
-# ============================================================
-
-def _get_area_m2(el, prefer: Tuple[str, ...] = ("Area",)) -> Optional[float]:
-    """
-    Best-effort area extraction from:
-      - IFC BaseQuantities (Qto_*BaseQuantities)
-      - quantity takeoff psets
-    Returns None if not found.
-    """
+    # --------
+    # Roofs
+    # --------
     try:
-        psets = _safe_get_psets(el)
-
-        # First: any Qto sets (common in IFC exports)
-        # Search all psets keys for "Qto_" and match prefer fields
-        for pset_name, props in (psets or {}).items():
-            if not isinstance(props, dict):
-                continue
-            if not str(pset_name).startswith("Qto_"):
-                continue
-            for field in prefer:
-                v = props.get(field)
-                fv = _to_float(v)
-                if fv is not None and fv > 0:
-                    return float(fv)
-
-        # Second: some exports store quantities elsewhere
-        for pset_name, props in (psets or {}).items():
-            if not isinstance(props, dict):
-                continue
-            for field in prefer:
-                v = props.get(field)
-                fv = _to_float(v)
-                if fv is not None and fv > 0:
-                    return float(fv)
-
+        ifc_roofs = ifc.by_type("IfcRoof") or []
     except Exception:
-        pass
+        ifc_roofs = []
 
-    return None
+    for r in ifc_roofs:
+        gid = _get_global_id(r)
+        name = _get_name(r) or f"Roof_{gid[:8] if gid else 'Unknown'}"
 
+        layer_pairs = _extract_layer_set_from_elem(ifc, r)
+        layers = []
+        total_th = 0.0
 
-def _get_orientation_label(el) -> str:
-    """
-    Best-effort orientation from ObjectPlacement.
-    If cannot compute, returns "Unknown".
-    """
-    try:
-        angle = _get_azimuth_deg(el)
-        if angle is None:
-            return "Unknown"
-        # Standard quadrant mapping:
-        # 0 = East, 90 = North, 180 = West, 270 = South  (depending on coordinate convention)
-        # Many BIM exports use X=east, Y=north. We'll map:
-        # az=0 → East, 90 → North, 180 → West, 270 → South
-        a = angle % 360.0
-        if 45 <= a < 135:
-            return "North"
-        if 135 <= a < 225:
-            return "West"
-        if 225 <= a < 315:
-            return "South"
-        return "East"
-    except Exception:
-        return "Unknown"
+        for mat_name, th_mm in layer_pairs:
+            lam, matched, conf = _match_lambda(mat_name, thermal_db)
+            if lam is None:
+                lam = 0.50
+                conf = "low"
+                matched = "DEFAULT(0.50)"
 
-
-def _get_window_orientation_label(win_el) -> Optional[str]:
-    """
-    Try to find host wall orientation via fills/void relationships.
-    If not possible, return None.
-    """
-    try:
-        # Some IFCs: IfcRelFillsElement → RelatingOpeningElement
-        # Opening element often has IfcRelVoidsElement linking to host wall.
-        for rel in getattr(win_el, "FillsVoids", []) or []:
-            try:
-                opening = getattr(rel, "RelatingOpeningElement", None)
-                if not opening:
-                    continue
-                for vr in getattr(opening, "VoidsElements", []) or []:
-                    host = getattr(vr, "RelatingBuildingElement", None)
-                    if host and host.is_a() in ["IfcWall", "IfcWallStandardCase"]:
-                        return _get_orientation_label(host)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return None
-
-
-def _get_azimuth_deg(el) -> Optional[float]:
-    """
-    Attempts to compute a 2D azimuth angle from placement RefDirection.
-    Returns degrees in [0,360), where 0 means +X direction.
-    """
-    try:
-        pl = getattr(el, "ObjectPlacement", None)
-        if not pl:
-            return None
-
-        rel = getattr(pl, "RelativePlacement", None)
-        if not rel:
-            # sometimes there is PlacementRelTo chain
-            rel = getattr(getattr(pl, "PlacementRelTo", None), "RelativePlacement", None)
-            if not rel:
-                return None
-
-        ref_dir = getattr(rel, "RefDirection", None)
-        if not ref_dir:
-            return None
-
-        d = getattr(ref_dir, "DirectionRatios", None)
-        if not d or len(d) < 2:
-            return None
-
-        x, y = float(d[0]), float(d[1])
-        if abs(x) < 1e-9 and abs(y) < 1e-9:
-            return None
-
-        import math
-        ang = math.degrees(math.atan2(y, x))
-        if ang < 0:
-            ang += 360.0
-        return ang
-
-    except Exception:
-        return None
-
-
-# ============================================================
-# IFC material traversal
-# ============================================================
-
-def _safe_get_material(el):
-    try:
-        return ifc_el.get_material(el)
-    except Exception:
-        return None
-
-
-def _flatten_layers(material_obj) -> List[Dict[str, Any]]:
-    """
-    Converts IFC material structure into a simple list of layers.
-    Supports:
-      - IfcMaterialLayerSetUsage
-      - IfcMaterialLayerSet
-      - IfcMaterialLayer
-      - IfcMaterial (single)
-    """
-    layers = []
-
-    try:
-        # IfcMaterialLayerSetUsage
-        if hasattr(material_obj, "ForLayerSet"):
-            mls = material_obj.ForLayerSet
-            return _flatten_layers(mls)
-
-        # IfcMaterialLayerSet
-        if hasattr(material_obj, "MaterialLayers") and material_obj.MaterialLayers:
-            for ml in material_obj.MaterialLayers:
-                try:
-                    mat = getattr(ml, "Material", None)
-                    mat_name = getattr(mat, "Name", None) if mat else None
-                    thk = getattr(ml, "LayerThickness", None)
-                    layers.append({
-                        "material_name": str(mat_name or "Unknown"),
-                        "thickness_mm": float(thk) * 1000.0 if thk is not None else 0.0,  # meters→mm (IFC typically meters)
-                    })
-                except Exception:
-                    continue
-            return layers
-
-        # IfcMaterialLayer
-        if material_obj.is_a("IfcMaterialLayer"):
-            mat = getattr(material_obj, "Material", None)
-            mat_name = getattr(mat, "Name", None) if mat else None
-            thk = getattr(material_obj, "LayerThickness", None)
+            r_val = (_mm_to_m(th_mm) / lam) if lam > 0 and th_mm > 0 else 0.0
             layers.append({
-                "material_name": str(mat_name or "Unknown"),
-                "thickness_mm": float(thk) * 1000.0 if thk is not None else 0.0,
+                "material_name": mat_name,
+                "matched_material": matched,
+                "confidence": conf,
+                "thickness_mm": float(th_mm),
+                "lambda": float(lam),
+                "r_value": float(r_val),
             })
-            return layers
+            total_th += float(th_mm)
 
-        # IfcMaterial (single material, no thickness)
-        if material_obj.is_a("IfcMaterial"):
-            mat_name = getattr(material_obj, "Name", None)
-            layers.append({
-                "material_name": str(mat_name or "Unknown"),
-                "thickness_mm": 0.0,
-            })
-            return layers
+        u, rtot = _u_value_from_layers(layers)
 
-        # Sometimes get_material returns a list/tuple
-        if isinstance(material_obj, (list, tuple)):
-            for m in material_obj:
-                layers += _flatten_layers(m)
-            return layers
+        area = _extract_area_m2(r)
 
-    except Exception:
-        pass
+        roofs.append({
+            "id": gid,
+            "name": name,
+            "area_m2": float(area) if area is not None else 0.0,
+            "layers": layers,
+            "layer_count": len(layers),
+            "total_thickness_mm": float(total_th) if total_th > 0 else 0.0,
+            "u_value": float(round(u, 4)) if u is not None else None,
+        })
 
-    return layers
-
-
-# ============================================================
-# DB matching (material → lambda)
-# ============================================================
-
-def _norm_key(s: str) -> str:
-    s = (s or "").lower()
-    s = re.sub(r"[^a-z0-9\s\-\_]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def _match_lambda(mat_name: str, thermal_db: pd.DataFrame) -> Tuple[str, float, str]:
-    """
-    Returns (matched_material_name, lambda_value, confidence)
-    Confidence:
-      HIGH   - exact normalized match
-      MEDIUM - keyword overlap match
-      LOW    - default lambda used
-    """
-    key = _norm_key(mat_name)
-    if not key:
-        return ("—", DEFAULT_LAMBDA, "LOW")
-
-    # HIGH: exact normalized match
-    exact = thermal_db[thermal_db["__mat_key__"] == key]
-    if len(exact) > 0:
-        row = exact.iloc[0]
-        return (str(row["__mat_name__"]), float(row["__lambda__"]), "HIGH")
-
-    # MEDIUM: keyword overlap (simple robust matcher)
-    tokens = set(key.split())
-    if tokens:
-        best = None
-        best_score = 0.0
-        for i in range(len(thermal_db)):
-            k2 = thermal_db.at[i, "__mat_key__"]
-            t2 = set(str(k2).split())
-            if not t2:
-                continue
-            inter = len(tokens & t2)
-            union = len(tokens | t2)
-            score = inter / union if union else 0.0
-            if score > best_score:
-                best_score = score
-                best = i
-        if best is not None and best_score >= 0.22:
-            row = thermal_db.iloc[best]
-            return (str(row["__mat_name__"]), float(row["__lambda__"]), "MEDIUM")
-
-    # LOW fallback
-    return ("—", DEFAULT_LAMBDA, "LOW")
-
-
-# ============================================================
-# Pset helpers
-# ============================================================
-
-def _safe_get_psets(el) -> Dict[str, Any]:
+    # --------
+    # Windows
+    # --------
     try:
-        return ifc_el.get_psets(el) or {}
+        ifc_windows = ifc.by_type("IfcWindow") or []
     except Exception:
-        return {}
+        ifc_windows = []
 
+    for win in ifc_windows:
+        gid = _get_global_id(win)
+        name = _get_name(win) or f"Window_{gid[:8] if gid else 'Unknown'}"
 
-def _pset_get_float(psets: Dict[str, Any], pset_name: str, prop_name: str) -> Optional[float]:
-    try:
-        p = psets.get(pset_name, {})
-        if not isinstance(p, dict):
-            return None
-        return _to_float(p.get(prop_name))
-    except Exception:
-        return None
+        # Window thermal properties commonly appear in Pset_WindowCommon
+        u = _get_pset_value(win, "Pset_WindowCommon", "ThermalTransmittance")
+        shgc = _get_pset_value(win, "Pset_WindowCommon", "SolarHeatGainCoefficient")
 
+        area = _extract_area_m2(win)
+        orientation = _guess_orientation_from_pset(win)
 
-def _to_float(v) -> Optional[float]:
-    if v is None:
-        return None
-    try:
-        # Sometimes IFC gives objects; str() can contain numbers
-        if isinstance(v, (int, float)):
-            return float(v)
-        s = str(v)
-        # extract first numeric
-        m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
-        return float(m.group(0)) if m else None
-    except Exception:
-        return None
+        windows.append({
+            "id": gid,
+            "name": name,
+            "orientation": orientation,
+            "area_m2": float(area) if area is not None else 0.0,
+            "u_value": _safe_float(u, None),
+            "shgc": _safe_float(shgc, None),
+            "width_m": None,
+            "height_m": None,
+        })
 
+    # --------
+    # Summary
+    # --------
+    total_wall_area = sum(w.get("area_m2", 0.0) or 0.0 for w in walls)
+    total_win_area = sum(w.get("area_m2", 0.0) or 0.0 for w in windows)
+    overall_wwr = (total_win_area / total_wall_area * 100.0) if total_wall_area > 0 else 0.0
 
-# ============================================================
-# Safety guard
-# ============================================================
+    summary = {
+        "total_external_walls": int(len(walls)),
+        "total_windows": int(len(windows)),
+        "total_roofs": int(len(roofs)),
+        "total_wall_area_m2": float(total_wall_area),
+        "overall_wwr_pct": float(round(overall_wwr, 2)),
+    }
 
-def _hard_guard_return(d: Dict[str, Any]) -> None:
-    """
-    Make sure we ALWAYS return what app expects.
-    """
-    if not isinstance(d, dict):
-        raise RuntimeError(f"Parser output must be dict, got {type(d)}")
-
-    required = ["summary", "walls", "windows", "roofs", "ifc_schema"]
-    missing = [k for k in required if k not in d]
-    if missing:
-        raise RuntimeError(f"Parser output missing keys: {missing}")
-
-    if not isinstance(d["summary"], dict):
-        raise RuntimeError("summary must be a dict")
-    for k in ["walls", "windows", "roofs"]:
-        if not isinstance(d[k], list):
-            raise RuntimeError(f"{k} must be a list")
-
-
-# ============================================================
-# End of file
-# ============================================================
+    # IMPORTANT: always return dict (never None)
+    return {
+        "ifc_schema": schema,
+        "summary": summary,
+        "walls": walls,
+        "windows": windows,
+        "roofs": roofs,
+    }
