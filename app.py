@@ -9,12 +9,18 @@ Codes   : MS1525:2019, ASHRAE 90.1-2019, Green Star, UK Part L 2021
 Run: streamlit run app.py
 """
 
+import os
+import json
+import base64
+import tempfile
+from datetime import datetime
+
 import streamlit as st
+import streamlit.components.v1 as components
+
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import tempfile, os, json
-from datetime import datetime
 
 from ifc_parser import parse_ifc, load_thermal_database
 from compliance import (
@@ -26,14 +32,37 @@ from compliance import (
     get_material_confidence_summary, compute_validation_stats,
     calculate_fabric_heat_loss, calculate_code_compliant_heat_loss
 )
-import base64
-import streamlit.components.v1 as components
 
-# ---- session key for viewer ----
-if "ifc_bytes" not in st.session_state:
-    st.session_state["ifc_bytes"] = None
+# ─────────────────────────────────────────────────
+# PAGE CONFIG (MUST BE FIRST STREAMLIT CALL)
+# ─────────────────────────────────────────────────
+st.set_page_config(
+    page_title="BIM Thermal Dashboard — Md Obidul Haque",
+    page_icon="🏗️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
+# ─────────────────────────────────────────────────
+# SESSION KEYS
+# ─────────────────────────────────────────────────
+for key, default in [
+    ("ifc_bytes", None),
+    ("parsed_data", None),
+    ("filename", None),
+    ("val_entered", False),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+# ─────────────────────────────────────────────────
+# IFC VIEWER (IFC.js)
+# ─────────────────────────────────────────────────
 def ifc_viewer_ifcjs(ifc_bytes: bytes, height: int = 520):
+    if not ifc_bytes:
+        st.warning("No IFC bytes available for viewer.")
+        return
+
     b64 = base64.b64encode(ifc_bytes).decode("utf-8")
 
     html = r"""
@@ -156,13 +185,6 @@ def ifc_viewer_ifcjs(ifc_bytes: bytes, height: int = 520):
 """
     html = html.replace("__B64__", b64).replace("__HEIGHT__", str(int(height)))
     components.html(html, height=int(height) + 20, scrolling=False)
-# ─────────────────────────────────────────────────
-st.set_page_config(
-    page_title="BIM Thermal Dashboard — Md Obidul Haque",
-    page_icon="🏗️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 # ─────────────────────────────────────────────────
 # CSS — dark glass with purple/cyan/pink gradients
@@ -363,7 +385,7 @@ def metric_card(label, value, sub="", color=None):
     </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────
-# SIDEBAR
+# SIDEBAR (always visible)
 # ─────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
@@ -419,15 +441,10 @@ st.markdown("""
 </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────
-# SESSION STATE
+# UPLOAD (ROBUST)
 # ─────────────────────────────────────────────────
-for key, default in [("parsed_data", None), ("filename", None), ("val_entered", False)]:
-    if key not in st.session_state:
-        st.session_state[key] = default
+uploaded = None  # IMPORTANT: avoid UnboundLocalError
 
-# ─────────────────────────────────────────────────
-# UPLOAD
-# ─────────────────────────────────────────────────
 if st.session_state.parsed_data is None:
     st.markdown("""
     <div class="upload-zone">
@@ -442,85 +459,71 @@ if st.session_state.parsed_data is None:
 
     uploaded = st.file_uploader("IFC", type=["ifc"], label_visibility="collapsed")
 
-if uploaded:
-    tmp_path = None
-    try:
-        # ✅ read bytes ONCE
-        ifc_bytes = uploaded.getvalue()
-        st.session_state["ifc_bytes"] = ifc_bytes  # ✅ for 3D viewer
-
-        with st.spinner("🔍 Parsing IFC · Extracting material layers · Calculating U-values..."):
-            with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
-                tmp.write(ifc_bytes)   # ✅ write same bytes to disk for parser
-                tmp_path = tmp.name
-
-            db_path = os.path.join(os.path.dirname(__file__), "thermal_database.csv")
-            thermal_db = load_thermal_database(db_path)
-
-            data = parse_ifc(tmp_path, thermal_db)
-
-            # ✅ Guard: parser must return a dict
-            if data is None:
-                st.error("❌ parse_ifc() returned None. Fix ifc_parser.py so it returns a dict.")
+    if uploaded is not None:
+        tmp_path = None
+        try:
+            # Read bytes ONCE
+            ifc_bytes = uploaded.getvalue()
+            if not ifc_bytes:
+                st.error("Uploaded file is empty. Please upload a valid IFC.")
                 st.stop()
 
-            if not isinstance(data, dict):
-                st.error(f"❌ parse_ifc() returned unexpected type: {type(data)}")
-                st.stop()
+            st.session_state["ifc_bytes"] = ifc_bytes
+            st.session_state["filename"] = uploaded.name
 
-            required = ["summary", "walls", "windows", "roofs"]
-            missing = [k for k in required if k not in data]
-            if missing:
-                st.error(f"❌ parse_ifc() returned dict but missing keys: {missing}")
-                st.write("Returned keys:", list(data.keys()))
-                st.stop()
+            with st.spinner("🔍 Parsing IFC · Extracting material layers · Calculating U-values..."):
+                with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
+                    tmp.write(ifc_bytes)
+                    tmp_path = tmp.name
 
-            st.session_state.parsed_data = data
-            st.session_state.filename = uploaded.name
-            st.session_state.val_entered = False
+                db_path = os.path.join(os.path.dirname(__file__), "thermal_database.csv")
+                thermal_db = load_thermal_database(db_path)
 
-        st.rerun()
+                # parse_ifc should return dict OR raise RuntimeError (never None silently)
+                data = parse_ifc(tmp_path, thermal_db)
 
-    except Exception as e:
-        st.error(f"❌ Error parsing IFC: {e}")
-        st.info("If this is a Revit export, ensure walls/roofs have material layers (Edit Assembly) and export as IFC4.")
+                # Hard guard here too (defensive)
+                if not isinstance(data, dict):
+                    st.error(f"❌ parse_ifc() returned unexpected type: {type(data)}")
+                    st.stop()
 
-    finally:
-        if tmp_path is not None and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+                required = ["summary", "walls", "windows", "roofs", "ifc_schema"]
+                missing = [k for k in required if k not in data]
+                if missing:
+                    st.error(f"❌ parse_ifc() returned dict but missing keys: {missing}")
+                    st.write("Returned keys:", list(data.keys()))
+                    st.stop()
 
-# ─────────────────────────────────────────────────
-# DATA LOADED
-# ─────────────────────────────────────────────────
-@st.cache_data
-def compute_wall_results(filename, code_name, walls_json):
-    """Cache compliance results per file+code combination."""
-    walls = json.loads(walls_json)
-    c = CODES[code_name]
-    return [(w, check_wall_compliance(w["u_value"], c)) for w in walls if w["u_value"] is not None]
+                st.session_state.parsed_data = data
+                st.session_state.val_entered = False
 
-@st.cache_data
-def get_unique_types(walls_json):
-    """Deduplicate walls by type name for research reporting."""
-    walls = json.loads(walls_json)
-    seen, unique = set(), []
-    for w in walls:
-        if w["name"] not in seen:
-            seen.add(w["name"])
-            unique.append(w)
-    return unique
+            st.rerun()
 
-data = st.session_state.parsed_data
+        except Exception as e:
+            st.error(f"❌ Error parsing IFC: {e}")
+            st.info("If this is a Revit export, ensure walls/roofs have material layers (Edit Assembly) and export as IFC4.")
+            st.stop()
 
-# ✅ HARD GUARD: stop if parser did not return expected dict
-if not isinstance(data, dict):
-    st.error(f"Parser returned unexpected type: {type(data)}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    # If still no data, stop here (prevents NoneType crashes)
     st.stop()
 
-required = ["summary", "walls", "windows", "roofs"]
+
+# ─────────────────────────────────────────────────
+# DATA LOADED (SAFE)
+# ─────────────────────────────────────────────────
+data = st.session_state.parsed_data
+if data is None:
+    st.error("Parsed data is missing. Click 'Upload New File' and re-upload.")
+    st.stop()
+
+required = ["summary", "walls", "windows", "roofs", "ifc_schema"]
 missing = [k for k in required if k not in data]
 if missing:
     st.error(f"Parsed IFC data is missing keys: {missing}")
@@ -532,21 +535,44 @@ walls   = data["walls"]
 windows = data["windows"]
 roofs   = data["roofs"]
 
+# ─────────────────────────────────────────────────
+# CACHED HELPERS
+# ─────────────────────────────────────────────────
+@st.cache_data
+def compute_wall_results(filename, code_name, walls_json):
+    """Cache compliance results per file+code combination."""
+    ws = json.loads(walls_json)
+    c = CODES[code_name]
+    return [(w, check_wall_compliance(w.get("u_value"), c)) for w in ws if w.get("u_value") is not None]
+
+@st.cache_data
+def get_unique_types(walls_json):
+    """Deduplicate walls by type name for research reporting."""
+    ws = json.loads(walls_json)
+    seen, unique = set(), []
+    for w in ws:
+        nm = w.get("name")
+        if nm and nm not in seen:
+            seen.add(nm)
+            unique.append(w)
+    return unique
+
 walls_json    = json.dumps(walls)
 wall_results  = compute_wall_results(st.session_state.filename, selected_code_name, walls_json)
 unique_types  = get_unique_types(walls_json)
 
-pass_count = sum(1 for _, r in wall_results if r["passed"])
+pass_count = sum(1 for _, r in wall_results if r.get("passed"))
 fail_count = len(wall_results) - pass_count
-pass_types = sum(1 for w in unique_types
-                 if w["u_value"] and w["u_value"] <= code["wall_u_max"])
+
+pass_types = sum(1 for w in unique_types if w.get("u_value") and float(w["u_value"]) <= code["wall_u_max"])
 fail_types = len(unique_types) - pass_types
 
-tpi = calculate_thermal_performance_index(walls, roofs, code, summary["overall_wwr_pct"])
+tpi = calculate_thermal_performance_index(walls, roofs, code, summary.get("overall_wwr_pct", 0))
 tpi_grade, tpi_color, tpi_label = get_tpi_grade(tpi)
+
 conf = get_material_confidence_summary(walls)
 
-# Sidebar file info + reset
+# Sidebar file info + reset (now safe because parsed_data exists)
 with st.sidebar:
     st.markdown("---")
 
@@ -557,11 +583,12 @@ with st.sidebar:
         compute_wall_results.clear()
         get_unique_types.clear()
         st.rerun()
+
     st.markdown(f"""
     <div style="font-size:.74rem;color:rgba(255,255,255,0.62);margin-top:.8rem;line-height:1.55;">
     📄 {st.session_state.filename}<br>
-    Schema: {data['ifc_schema']}<br>
-    Instances: {summary['total_external_walls']} walls · {summary['total_windows']} windows<br>
+    Schema: {data.get('ifc_schema','—')}<br>
+    Instances: {summary.get('total_external_walls',0)} walls · {summary.get('total_windows',0)} windows<br>
     Unique types: {len(unique_types)}<br>
     Parsed: {datetime.now().strftime('%H:%M:%S')}
     </div>""", unsafe_allow_html=True)
@@ -569,9 +596,9 @@ with st.sidebar:
     st.markdown(f"""
     <div style="margin-top:.9rem;font-size:.74rem;color:rgba(255,255,255,0.62);">
     <b>Material Match Confidence</b><br>
-    🟢 High: {conf['high_pct']}% &nbsp;
-    🟡 Med: {conf['medium_pct']}% &nbsp;
-    🔴 Low: {conf['low_pct']}%<br>
+    🟢 High: {conf.get('high_pct',0)}% &nbsp;
+    🟡 Med: {conf.get('medium_pct',0)}% &nbsp;
+    🔴 Low: {conf.get('low_pct',0)}%<br>
     <span style="font-size:.66rem;color:rgba(255,255,255,.44);">
     Report in paper methodology section</span>
     </div>""", unsafe_allow_html=True)
@@ -582,21 +609,23 @@ with st.sidebar:
 st.markdown('<div class="section-title">01 — PROJECT OVERVIEW</div>', unsafe_allow_html=True)
 
 c1,c2,c3,c4,c5,c6 = st.columns(6)
-with c1: metric_card("Wall Instances", str(summary["total_external_walls"]), "elements in IFC")
+with c1: metric_card("Wall Instances", str(summary.get("total_external_walls",0)), "elements in IFC")
 with c2: metric_card("Unique Types", str(len(unique_types)), "distinct assemblies")
-with c3: metric_card("Windows", str(summary["total_windows"]), "glazing units")
-with c4: metric_card("Envelope Area", f"{summary['total_wall_area_m2']:.0f} m²", "total external wall")
+with c3: metric_card("Windows", str(summary.get("total_windows",0)), "glazing units")
+with c4: metric_card("Envelope Area", f"{float(summary.get('total_wall_area_m2',0)):.0f} m²", "total external wall")
+
 with c5:
-    wwr = summary["overall_wwr_pct"]
+    wwr = float(summary.get("overall_wwr_pct", 0) or 0)
     metric_card("Overall WWR", f"{wwr:.1f}%", f"limit: {code['wwr_max_pct']}%",
                 CT["pass"] if wwr <= code["wwr_max_pct"] else CT["fail"])
+
 with c6:
     metric_card("Thermal Index", f"{tpi}/100", f"Grade {tpi_grade} · {tpi_label}", tpi_color)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # Compliance banner
-if fail_types == 0:
+if len(unique_types) > 0 and fail_types == 0:
     st.markdown(f"""
     <div style="background:rgba(52,211,153,0.10);border:1px solid rgba(52,211,153,0.22);
     border-radius:16px;padding:1rem 1.2rem;display:flex;align-items:center;gap:1rem;
@@ -609,7 +638,7 @@ if fail_types == 0:
         All {len(unique_types)} unique assembly types pass {selected_code_name}</div>
     </div></div>""", unsafe_allow_html=True)
 else:
-    pct = round(fail_types / len(unique_types) * 100, 1) if unique_types else 0
+    pct = round((fail_types / max(len(unique_types),1)) * 100, 1)
     st.markdown(f"""
     <div style="background:rgba(251,113,133,0.10);border:1px solid rgba(251,113,133,0.22);
     border-radius:16px;padding:1rem 1.2rem;display:flex;align-items:center;gap:1rem;
@@ -622,7 +651,7 @@ else:
       <div style="font-size:.82rem;color:rgba(255,255,255,0.70);">
         {pass_types} types passing · {fail_types} types failing · Standard: {selected_code_name}<br>
         <span style="font-size:.76rem;opacity:.75;">
-        (Unique types: {len(unique_types)} · Total wall instances: {summary['total_external_walls']})</span>
+        (Unique types: {len(unique_types)} · Total wall instances: {summary.get('total_external_walls',0)})</span>
       </div>
     </div></div>""", unsafe_allow_html=True)
 
@@ -651,24 +680,16 @@ with tab0:
 
     left, right = st.columns([3, 2])
 
-    # -------------------------
-    # LEFT: 3D Viewer
-    # -------------------------
     with left:
         st.markdown('<div class="section-title">3D MODEL VIEW</div>', unsafe_allow_html=True)
-
         if st.session_state.get("ifc_bytes"):
             ifc_viewer_ifcjs(st.session_state["ifc_bytes"], height=560)
         else:
             st.warning("No IFC bytes found in session. Please click 'Upload New File' and upload again.")
 
-    # -------------------------
-    # RIGHT: KPI + Key plots
-    # -------------------------
     with right:
         st.markdown('<div class="section-title">EXECUTIVE KPIs</div>', unsafe_allow_html=True)
 
-        # KPIs (use what you already computed)
         wwr = float(summary.get("overall_wwr_pct", 0) or 0)
         total_walls = int(summary.get("total_external_walls", 0) or 0)
         total_windows = int(summary.get("total_windows", 0) or 0)
@@ -688,13 +709,14 @@ with tab0:
 
         st.markdown('<div class="section-title">PASS / FAIL SNAPSHOT</div>', unsafe_allow_html=True)
 
-        # donut pass/fail of wall types
         fig_pf = go.Figure(go.Pie(
             labels=["Pass","Fail"],
             values=[pass_types, fail_types],
             hole=0.62,
-            marker=dict(colors=["rgba(52,211,153,0.88)","rgba(251,113,133,0.38)"],
-                        line=dict(color="rgba(255,255,255,0.12)",width=2)),
+            marker=dict(
+                colors=["rgba(52,211,153,0.88)","rgba(251,113,133,0.38)"],
+                line=dict(color="rgba(255,255,255,0.12)",width=2)
+            ),
             textinfo="label+percent",
             textfont=dict(size=11,family=CT["ff"],color=CT["font"]),
             hovertemplate="<b>%{label}</b><br>%{value} types<extra></extra>",
@@ -711,22 +733,18 @@ with tab0:
         fig_pf.update_layout(**lay_pf)
         st.plotly_chart(fig_pf, use_container_width=True)
 
-    # -------------------------
-    # Bottom row: Key findings plots + summary table
-    # -------------------------
     st.markdown('<div class="section-title">KEY FINDINGS (TOP ISSUES + FACADE)</div>', unsafe_allow_html=True)
     cA, cB = st.columns([2, 2])
 
-    # A) Worst 8 wall types by U-value
     with cA:
         worst = []
         seen = set()
         for w, r in sorted(wall_results, key=lambda x: float(x[0].get("u_value") or 0), reverse=True):
-            name = w.get("name")
-            if not name or name in seen:
+            nm = w.get("name")
+            if not nm or nm in seen:
                 continue
-            seen.add(name)
-            worst.append((name, float(w.get("u_value") or 0), r.get("passed", False)))
+            seen.add(nm)
+            worst.append((nm, float(w.get("u_value") or 0), bool(r.get("passed", False))))
             if len(worst) >= 8:
                 break
 
@@ -755,14 +773,13 @@ with tab0:
         else:
             st.info("No wall results available to summarize.")
 
-    # B) Facade avg U (from your tab3 logic, recompute quickly)
     with cB:
         orientations = ["North","South","East","West"]
         facade_data = {}
         for ori in orientations:
             ow = [w for w in walls if w.get("orientation")==ori and w.get("u_value")]
             if ow:
-                total_area = sum(w.get("area_m2",0) for w in ow) or 1
+                total_area = sum(float(w.get("area_m2",0) or 0) for w in ow) or 1.0
                 weighted_u = sum(float(w["u_value"]) * float(w.get("area_m2",0) or 0) for w in ow) / total_area
                 facade_data[ori] = float(weighted_u)
             else:
@@ -791,230 +808,216 @@ with tab0:
         else:
             st.info("No facade orientation data available (check wall orientation export in Revit).")
 
-    # Executive summary table
     st.markdown('<div class="section-title">EXECUTIVE SUMMARY TABLE</div>', unsafe_allow_html=True)
 
-    exec_rows = [{
-        "Metric": "Selected Code",
-        "Value": selected_code_name
-    },{
-        "Metric": "Overall WWR",
-        "Value": f"{wwr:.1f}% (limit {code['wwr_max_pct']}%)"
-    },{
-        "Metric": "Wall Type Compliance",
-        "Value": f"{pass_types} pass / {fail_types} fail (types)"
-    },{
-        "Metric": "Worst Wall U-value",
-        "Value": f"{max([float(w.get('u_value') or 0) for w,_ in wall_results] or [0]):.3f} W/m²K"
-    },{
-        "Metric": "Thermal Performance Index",
-        "Value": f"{tpi}/100 (Grade {tpi_grade})"
-    }]
+    worst_u = 0.0
+    if wall_results:
+        worst_u = max([float(w.get("u_value") or 0) for w,_ in wall_results] or [0.0])
 
-    df_exec = pd.DataFrame(exec_rows)
-    st.dataframe(df_exec, use_container_width=True, hide_index=True)
+    exec_rows = [
+        {"Metric": "Selected Code", "Value": selected_code_name},
+        {"Metric": "Overall WWR", "Value": f"{wwr:.1f}% (limit {code['wwr_max_pct']}%)"},
+        {"Metric": "Wall Type Compliance", "Value": f"{pass_types} pass / {fail_types} fail (types)"},
+        {"Metric": "Worst Wall U-value", "Value": f"{worst_u:.3f} W/m²K"},
+        {"Metric": "Thermal Performance Index", "Value": f"{tpi}/100 (Grade {tpi_grade})"},
+    ]
+    st.dataframe(pd.DataFrame(exec_rows), use_container_width=True, hide_index=True)
+
 # ══════════════════════════════════════════════════
 # TAB 1 — U-VALUE ANALYSIS
 # ══════════════════════════════════════════════════
 with tab1:
-    st.markdown('<div class="section-title">02 — U-VALUE COMPLIANCE ASSESSMENT</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="section-title">02 — U-VALUE COMPLIANCE ASSESSMENT</div>', unsafe_allow_html=True)
 
     if not wall_results:
         st.warning("No U-values calculated. Ensure wall assemblies have material layers defined in Revit.")
-    else:
-        threshold = code["wall_u_max"]
-        # Sort worst first for visual clarity
-        sorted_walls = sorted(wall_results, key=lambda x: x[0].get("u_value", 0), reverse=True)
+        st.stop()
 
-        wall_names, u_values, bar_colors, hover_texts = [], [], [], []
-        for wall, result in sorted_walls:
-            wall_names.append(wall["name"][:42])
-            u_values.append(wall["u_value"])
-            bar_colors.append(CT["pass"] if result["passed"] else CT["fail"])
-            layers_str = " | ".join(
-                f"{l['material_name']} {l['thickness_mm']:.0f}mm"
-                for l in wall["layers"] if l.get("thickness_mm")
-            )
-            hover_texts.append(
-                f"<b>{wall['name']}</b><br>"
-                f"U-value: {wall['u_value']} W/m²K<br>"
-                f"Status: {result['status']}<br>"
-                f"Margin: {result['margin']:+.4f} W/m²K<br>"
-                f"Layers: {layers_str}"
-            )
+    threshold = code["wall_u_max"]
+    sorted_walls = sorted(wall_results, key=lambda x: float(x[0].get("u_value") or 0), reverse=True)
 
-        col_bar, col_right = st.columns([3, 2])
+    wall_names, u_values, bar_colors, hover_texts = [], [], [], []
+    for wall, result in sorted_walls:
+        wall_names.append((wall.get("name","Wall"))[:42])
+        u_values.append(float(wall.get("u_value") or 0))
+        bar_colors.append(CT["pass"] if result.get("passed") else CT["fail"])
+        layers_str = " | ".join(
+            f"{l.get('material_name','?')} {float(l.get('thickness_mm',0) or 0):.0f}mm"
+            for l in wall.get("layers", []) if l.get("thickness_mm")
+        )
+        hover_texts.append(
+            f"<b>{wall.get('name','Wall')}</b><br>"
+            f"U-value: {wall.get('u_value')} W/m²K<br>"
+            f"Status: {result.get('status','—')}<br>"
+            f"Margin: {float(result.get('margin',0) or 0):+.4f} W/m²K<br>"
+            f"Layers: {layers_str}"
+        )
 
-        with col_bar:
-            n = len(wall_names)
+    col_bar, col_right = st.columns([3, 2])
 
-            # ✅ FIX: cap height so the chart never becomes extremely tall
-            ch = min(650, max(360, n * 18 + 140))
+    with col_bar:
+        n = len(wall_names)
+        ch = min(650, max(360, n * 18 + 140))
 
-            fig_bar = go.Figure()
-            fig_bar.add_trace(go.Bar(
-                y=wall_names, x=u_values, orientation="h",
-                marker_color=bar_colors,
-                text=[f"{u:.3f}" for u in u_values],
-                textposition="outside",
-                textfont=dict(family=CT["ff"], size=10, color=CT["font"]),
-                hovertext=hover_texts, hoverinfo="text",
-                hoverlabel=dict(bgcolor="rgba(8,12,24,0.96)",
-                                bordercolor="rgba(255,255,255,0.14)",
-                                font=dict(color=CT["font"])),
-            ))
-            fig_bar.add_vline(x=threshold, line_dash="dash",
-                              line_color=CT["warn"], line_width=2,
-                              annotation_text=f"Code Limit: {threshold} W/m²K",
-                              annotation_font=dict(color=CT["warn"],size=10,family=CT["ff"]),
-                              annotation_position="top right")
-            lay = chlayout("Wall U-Values vs. Compliance Threshold", h=ch, l=5, r=72, t=42, b=25)
-            lay["xaxis"]["title"] = "U-Value (W/m²K)"
-            lay["xaxis"]["title_font"] = dict(size=10, color=CT["muted"])
-            lay["bargap"] = 0.30
-            lay["showlegend"] = False
-            fig_bar.update_layout(**lay)
-            st.plotly_chart(fig_bar, use_container_width=True)
+        fig_bar = go.Figure()
+        fig_bar.add_trace(go.Bar(
+            y=wall_names, x=u_values, orientation="h",
+            marker_color=bar_colors,
+            text=[f"{u:.3f}" for u in u_values],
+            textposition="outside",
+            textfont=dict(family=CT["ff"], size=10, color=CT["font"]),
+            hovertext=hover_texts, hoverinfo="text",
+            hoverlabel=dict(bgcolor="rgba(8,12,24,0.96)",
+                            bordercolor="rgba(255,255,255,0.14)",
+                            font=dict(color=CT["font"])),
+        ))
+        fig_bar.add_vline(x=threshold, line_dash="dash",
+                          line_color=CT["warn"], line_width=2,
+                          annotation_text=f"Code Limit: {threshold} W/m²K",
+                          annotation_font=dict(color=CT["warn"],size=10,family=CT["ff"]),
+                          annotation_position="top right")
+        lay = chlayout("Wall U-Values vs. Compliance Threshold", h=ch, l=5, r=72, t=42, b=25)
+        lay["xaxis"]["title"] = "U-Value (W/m²K)"
+        lay["xaxis"]["title_font"] = dict(size=10, color=CT["muted"])
+        lay["bargap"] = 0.30
+        lay["showlegend"] = False
+        fig_bar.update_layout(**lay)
+        st.plotly_chart(fig_bar, use_container_width=True)
 
-        with col_right:
-            # ✅ FIX: keep right-column plots always visible (do NOT tie height to left chart)
-            half_h = 260
+    with col_right:
+        half_h = 260
 
-            # Donut — unique types pass/fail
-            fig_donut = go.Figure(go.Pie(
-                labels=["Pass","Fail"],
-                values=[pass_types, fail_types],
-                hole=0.60,
-                marker=dict(colors=["rgba(52,211,153,0.88)","rgba(251,113,133,0.38)"],
-                            line=dict(color="rgba(255,255,255,0.12)",width=2)),
-                textinfo="label+percent",
-                textfont=dict(size=11,family=CT["ff"],color=CT["font"]),
-                hovertemplate="<b>%{label}</b><br>%{value} assembly types<extra></extra>",
-                pull=[0.04,0.04]
-            ))
-            fig_donut.add_annotation(
-                text=f"<b>{len(unique_types)}</b><br>types",
-                x=0.5,y=0.5,showarrow=False,
-                font=dict(size=14,color=CT["font"],family=CT["ff"]),align="center"
-            )
-            dl = chlayout("Assembly Type Pass / Fail", h=half_h, l=10, r=10, t=36, b=28)
-            dl["showlegend"] = True
-            dl["legend"] = dict(orientation="h",x=0.5,xanchor="center",y=-0.06,
-                                 font=dict(size=10,color=CT["muted"]))
-            fig_donut.update_layout(**dl)
-            st.plotly_chart(fig_donut, use_container_width=True)
+        fig_donut = go.Figure(go.Pie(
+            labels=["Pass","Fail"],
+            values=[pass_types, fail_types],
+            hole=0.60,
+            marker=dict(colors=["rgba(52,211,153,0.88)","rgba(251,113,133,0.38)"],
+                        line=dict(color="rgba(255,255,255,0.12)",width=2)),
+            textinfo="label+percent",
+            textfont=dict(size=11,family=CT["ff"],color=CT["font"]),
+            hovertemplate="<b>%{label}</b><br>%{value} assembly types<extra></extra>",
+            pull=[0.04,0.04]
+        ))
+        fig_donut.add_annotation(
+            text=f"<b>{len(unique_types)}</b><br>types",
+            x=0.5,y=0.5,showarrow=False,
+            font=dict(size=14,color=CT["font"],family=CT["ff"]),align="center"
+        )
+        dl = chlayout("Assembly Type Pass / Fail", h=half_h, l=10, r=10, t=36, b=28)
+        dl["showlegend"] = True
+        dl["legend"] = dict(orientation="h",x=0.5,xanchor="center",y=-0.06,
+                             font=dict(size=10,color=CT["muted"]))
+        fig_donut.update_layout(**dl)
+        st.plotly_chart(fig_donut, use_container_width=True)
 
-            # Box plot
-            pass_u = [w["u_value"] for w,r in wall_results if r["passed"] and w["u_value"]]
-            fail_u = [w["u_value"] for w,r in wall_results if not r["passed"] and w["u_value"]]
-            fig_box = go.Figure()
-            if pass_u:
-                fig_box.add_trace(go.Box(
-                    y=pass_u, name="Pass",
-                    marker_color="rgba(52,211,153,0.90)",
-                    line=dict(color="rgba(52,211,153,0.90)",width=1.5),
-                    fillcolor="rgba(52,211,153,0.12)", boxmean="sd"
-                ))
-            if fail_u:
-                fig_box.add_trace(go.Box(
-                    y=fail_u, name="Fail",
-                    marker_color="rgba(251,113,133,0.72)",
-                    line=dict(color="rgba(251,113,133,0.72)",width=1.5),
-                    fillcolor="rgba(251,113,133,0.10)", boxmean="sd"
-                ))
-            fig_box.add_hline(y=threshold, line_dash="dash",
-                              line_color=CT["warn"], line_width=1.5,
-                              annotation_text=f"Limit: {threshold}",
-                              annotation_font=dict(size=9,color=CT["warn"],family=CT["ff"]))
-            bl = chlayout("U-Value Distribution (with SD)", h=half_h, l=45, r=12, t=36, b=28)
-            bl["yaxis"]["title"] = "W/m²K"
-            bl["yaxis"]["title_font"] = dict(size=9,color=CT["muted"])
-            bl["showlegend"] = True
-            bl["legend"] = dict(orientation="h",x=0.5,xanchor="center",y=-0.10,
-                                 font=dict(size=10,color=CT["muted"]))
-            fig_box.update_layout(**bl)
-            st.plotly_chart(fig_box, use_container_width=True)
+        pass_u = [float(w.get("u_value") or 0) for w,r in wall_results if r.get("passed") and w.get("u_value")]
+        fail_u = [float(w.get("u_value") or 0) for w,r in wall_results if (not r.get("passed")) and w.get("u_value")]
 
-        # ── Layer Details ──
-        st.markdown('<div class="section-title">WALL ASSEMBLY LAYER DETAILS</div>',
-                    unsafe_allow_html=True)
-        st.markdown("""
-        <div class="info-box">
-        📐 <b>ISO 6946:</b> U = 1 / (R<sub>si</sub> + Σ d<sub>i</sub>/λ<sub>i</sub> + R<sub>so</sub>)
-        &nbsp;·&nbsp; R<sub>si</sub>=0.13 &nbsp;·&nbsp; R<sub>so</sub>=0.04 m²K/W<br>
-        <span style="font-size:.78rem;color:rgba(255,255,255,0.52);">
-        λ values from published databases (ASHRAE Fundamentals / EN 12524).
-        Confidence = material name matching accuracy.</span>
-        </div>""", unsafe_allow_html=True)
+        fig_box = go.Figure()
+        if pass_u:
+            fig_box.add_trace(go.Box(y=pass_u, name="Pass", boxmean="sd"))
+        if fail_u:
+            fig_box.add_trace(go.Box(y=fail_u, name="Fail", boxmean="sd"))
 
-        shown_types = set()
-        for wall, result in sorted_walls:
-            # Show each unique type once in detail expanders
-            is_dupe = wall["name"] in shown_types
-            shown_types.add(wall["name"])
-            dupe_label = " *(duplicate instance)*" if is_dupe else ""
-            margin_txt = (f"✓ within limit by {abs(result['margin'])} W/m²K"
-                          if result["passed"]
-                          else f"✗ exceeds by {abs(result['margin'])} W/m²K")
-            margin_col = "rgba(52,211,153,0.95)" if result["passed"] else "rgba(251,113,133,0.95)"
+        fig_box.add_hline(y=threshold, line_dash="dash",
+                          line_color=CT["warn"], line_width=1.5,
+                          annotation_text=f"Limit: {threshold}",
+                          annotation_font=dict(size=9,color=CT["warn"],family=CT["ff"]))
+        bl = chlayout("U-Value Distribution (with SD)", h=half_h, l=45, r=12, t=36, b=28)
+        bl["yaxis"]["title"] = "W/m²K"
+        bl["yaxis"]["title_font"] = dict(size=9,color=CT["muted"])
+        bl["showlegend"] = True
+        bl["legend"] = dict(orientation="h",x=0.5,xanchor="center",y=-0.10,
+                             font=dict(size=10,color=CT["muted"]))
+        fig_box.update_layout(**bl)
+        st.plotly_chart(fig_box, use_container_width=True)
 
-            with st.expander(
-                f"{'✅' if result['passed'] else '❌'}  {wall['name']}{dupe_label}  ·  "
-                f"U = {wall['u_value']} W/m²K  ·  {margin_txt}"
-            ):
-                ca, cb = st.columns([3,1])
-                with ca:
-                    rows = []
-                    for i, layer in enumerate(wall["layers"]):
-                        r = layer.get("r_value", 0)
-                        rows.append({
-                            "Layer": i+1,
-                            "Material (IFC)": layer["material_name"],
-                            "DB Match": layer.get("matched_material","—"),
-                            "Confidence": layer.get("confidence","—").upper(),
-                            "Thickness (mm)": f"{layer['thickness_mm']:.1f}" if layer.get("thickness_mm") else "—",
-                            "λ (W/mK)": layer.get("lambda","—"),
-                            "R (m²K/W)": f"{r:.4f}" if isinstance(r,float) else "—",
-                        })
-                    rows += [
-                        {"Layer":"Rsi","Material (IFC)":"Interior surface resistance",
-                         "DB Match":"ISO 6946","Confidence":"STANDARD",
-                         "Thickness (mm)":"—","λ (W/mK)":"—","R (m²K/W)":"0.1300"},
-                        {"Layer":"Rso","Material (IFC)":"Exterior surface resistance",
-                         "DB Match":"ISO 6946","Confidence":"STANDARD",
-                         "Thickness (mm)":"—","λ (W/mK)":"—","R (m²K/W)":"0.0400"},
-                    ]
-                    r_total = sum(float(row["R (m²K/W)"]) for row in rows if row["R (m²K/W)"] != "—")
-                    rows.append({"Layer":"TOTAL","Material (IFC)":"—","DB Match":"—",
-                                 "Confidence":f"→ U = {wall['u_value']} W/m²K",
-                                 "Thickness (mm)":f"{wall['total_thickness_mm']:.0f}",
-                                 "λ (W/mK)":"—","R (m²K/W)":f"{r_total:.4f}"})
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.markdown('<div class="section-title">WALL ASSEMBLY LAYER DETAILS</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="info-box">
+    📐 <b>ISO 6946:</b> U = 1 / (R<sub>si</sub> + Σ d<sub>i</sub>/λ<sub>i</sub> + R<sub>so</sub>)
+    &nbsp;·&nbsp; R<sub>si</sub>=0.13 &nbsp;·&nbsp; R<sub>so</sub>=0.04 m²K/W<br>
+    <span style="font-size:.78rem;color:rgba(255,255,255,0.52);">
+    λ values from published databases (ASHRAE Fundamentals / EN 12524).
+    Confidence = material name matching accuracy.</span>
+    </div>""", unsafe_allow_html=True)
 
-                with cb:
-                    badge = '<span class="badge-pass">✅ PASS</span>' if result["passed"] \
-                            else '<span class="badge-fail">❌ FAIL</span>'
-                    st.markdown(f"""
-                    <div style="text-align:center;padding:1rem;border-radius:14px;
-                      background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.11);">
-                      {badge}
-                      <div style="margin-top:1.2rem;">
-                        <div class="metric-label">Calculated U</div>
-                        <div style="font-size:1.9rem;font-family:'JetBrains Mono',monospace;
-                          font-weight:900;color:{CT['font']};">{wall['u_value']}</div>
-                        <div style="font-size:.70rem;color:{CT['muted']};">W/m²K</div>
-                      </div>
-                      <div style="margin-top:.9rem;">
-                        <div class="metric-label">Code Limit</div>
-                        <div style="font-size:1.5rem;font-family:'JetBrains Mono',monospace;
-                          font-weight:900;color:{CT['warn']};">{threshold}</div>
-                        <div style="font-size:.70rem;color:{CT['muted']};">W/m²K</div>
-                      </div>
-                      <div style="margin-top:.9rem;font-size:.78rem;color:{margin_col};">
-                        {margin_txt}
-                      </div>
-                    </div>""", unsafe_allow_html=True)
+    shown_types = set()
+    for wall, result in sorted_walls:
+        nm = wall.get("name","Wall")
+        is_dupe = nm in shown_types
+        shown_types.add(nm)
+        dupe_label = " *(duplicate instance)*" if is_dupe else ""
+        margin = float(result.get("margin", 0) or 0)
+        margin_txt = (f"✓ within limit by {abs(margin):.4f} W/m²K"
+                      if result.get("passed") else f"✗ exceeds by {abs(margin):.4f} W/m²K")
+        margin_col = "rgba(52,211,153,0.95)" if result.get("passed") else "rgba(251,113,133,0.95)"
+
+        with st.expander(
+            f"{'✅' if result.get('passed') else '❌'}  {nm}{dupe_label}  ·  "
+            f"U = {wall.get('u_value')} W/m²K  ·  {margin_txt}"
+        ):
+            ca, cb = st.columns([3,1])
+            with ca:
+                rows = []
+                for i, layer in enumerate(wall.get("layers", [])):
+                    r = layer.get("r_value", 0)
+                    rows.append({
+                        "Layer": i+1,
+                        "Material (IFC)": layer.get("material_name","—"),
+                        "DB Match": layer.get("matched_material","—"),
+                        "Confidence": str(layer.get("confidence","—")).upper(),
+                        "Thickness (mm)": f"{float(layer.get('thickness_mm') or 0):.1f}" if layer.get("thickness_mm") else "—",
+                        "λ (W/mK)": layer.get("lambda","—"),
+                        "R (m²K/W)": f"{float(r):.4f}" if isinstance(r,(int,float)) else "—",
+                    })
+                rows += [
+                    {"Layer":"Rsi","Material (IFC)":"Interior surface resistance",
+                     "DB Match":"ISO 6946","Confidence":"STANDARD",
+                     "Thickness (mm)":"—","λ (W/mK)":"—","R (m²K/W)":"0.1300"},
+                    {"Layer":"Rso","Material (IFC)":"Exterior surface resistance",
+                     "DB Match":"ISO 6946","Confidence":"STANDARD",
+                     "Thickness (mm)":"—","λ (W/mK)":"—","R (m²K/W)":"0.0400"},
+                ]
+                r_total = 0.0
+                for row in rows:
+                    rv = row.get("R (m²K/W)")
+                    if rv not in (None, "—"):
+                        try:
+                            r_total += float(rv)
+                        except Exception:
+                            pass
+                rows.append({
+                    "Layer":"TOTAL","Material (IFC)":"—","DB Match":"—",
+                    "Confidence":f"→ U = {wall.get('u_value')} W/m²K",
+                    "Thickness (mm)":f"{float(wall.get('total_thickness_mm') or 0):.0f}",
+                    "λ (W/mK)":"—","R (m²K/W)":f"{r_total:.4f}"
+                })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            with cb:
+                badge = '<span class="badge-pass">✅ PASS</span>' if result.get("passed") \
+                        else '<span class="badge-fail">❌ FAIL</span>'
+                st.markdown(f"""
+                <div style="text-align:center;padding:1rem;border-radius:14px;
+                  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.11);">
+                  {badge}
+                  <div style="margin-top:1.2rem;">
+                    <div class="metric-label">Calculated U</div>
+                    <div style="font-size:1.9rem;font-family:'JetBrains Mono',monospace;
+                      font-weight:900;color:{CT['font']};">{wall.get('u_value')}</div>
+                    <div style="font-size:.70rem;color:{CT['muted']};">W/m²K</div>
+                  </div>
+                  <div style="margin-top:.9rem;">
+                    <div class="metric-label">Code Limit</div>
+                    <div style="font-size:1.5rem;font-family:'JetBrains Mono',monospace;
+                      font-weight:900;color:{CT['warn']};">{threshold}</div>
+                    <div style="font-size:.70rem;color:{CT['muted']};">W/m²K</div>
+                  </div>
+                  <div style="margin-top:.9rem;font-size:.78rem;color:{margin_col};">
+                    {margin_txt}
+                  </div>
+                </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════
 # TAB 2 — R-VALUE ANALYSIS (ISO 6946)
