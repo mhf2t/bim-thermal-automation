@@ -441,9 +441,9 @@ st.markdown("""
 </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────
-# UPLOAD (ROBUST)
+# UPLOAD (ROBUST) — CORRECTED
 # ─────────────────────────────────────────────────
-uploaded = None  # IMPORTANT: avoid UnboundLocalError
+uploaded = None  # avoid UnboundLocalError
 
 if st.session_state.parsed_data is None:
     st.markdown("""
@@ -479,10 +479,10 @@ if st.session_state.parsed_data is None:
                 db_path = os.path.join(os.path.dirname(__file__), "thermal_database.csv")
                 thermal_db = load_thermal_database(db_path)
 
-                # parse_ifc should return dict OR raise RuntimeError (never None silently)
+                # ✅ Call parser ONCE
                 data = parse_ifc(tmp_path, thermal_db)
 
-                # Hard guard here too (defensive)
+                # Defensive guard (parse_ifc must return dict)
                 if not isinstance(data, dict):
                     st.error(f"❌ parse_ifc() returned unexpected type: {type(data)}")
                     st.stop()
@@ -511,7 +511,7 @@ if st.session_state.parsed_data is None:
                 except Exception:
                     pass
 
-    # If still no data, stop here (prevents NoneType crashes)
+    # If no upload yet, stop so app doesn't run with None parsed_data
     st.stop()
 
 
