@@ -26,7 +26,136 @@ from compliance import (
     get_material_confidence_summary, compute_validation_stats,
     calculate_fabric_heat_loss, calculate_code_compliant_heat_loss
 )
+import base64
+import streamlit.components.v1 as components
 
+# ---- session key for viewer ----
+if "ifc_bytes" not in st.session_state:
+    st.session_state["ifc_bytes"] = None
+
+def ifc_viewer_ifcjs(ifc_bytes: bytes, height: int = 520):
+    b64 = base64.b64encode(ifc_bytes).decode("utf-8")
+
+    html = r"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body { margin:0; padding:0; width:100%; height:100%; background: transparent; overflow:hidden; }
+    #viewer {
+      width:100%;
+      height: __HEIGHT__px;
+      border-radius:16px;
+      border:1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 18px 56px rgba(0,0,0,0.35);
+      overflow:hidden;
+      position:relative;
+      background: #0b1020;
+    }
+    #hint{
+      position:absolute; top:12px; left:12px;
+      background: rgba(0,0,0,0.55);
+      color: rgba(255,255,255,0.85);
+      padding: 8px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      backdrop-filter: blur(10px);
+      z-index: 9;
+    }
+  </style>
+</head>
+<body>
+  <div id="viewer"><div id="hint">🖱️ Drag = orbit · Scroll = zoom · Shift+Drag = pan</div></div>
+
+  <script type="module">
+    import * as THREE from "https://unpkg.com/three@0.155.0/build/three.module.js";
+    import { OrbitControls } from "https://unpkg.com/three@0.155.0/examples/jsm/controls/OrbitControls.js";
+    import { IFCLoader } from "https://unpkg.com/web-ifc-three@0.0.152/IFCLoader.js";
+
+    const container = document.getElementById("viewer");
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b1020);
+
+    const camera = new THREE.PerspectiveCamera(60, container.clientWidth/container.clientHeight, 0.1, 2000);
+    camera.position.set(12, 10, 12);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 1.0);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(10, 20, 10);
+    scene.add(dir);
+
+    const grid = new THREE.GridHelper(60, 60, 0x223355, 0x111a2a);
+    grid.material.opacity = 0.25;
+    grid.material.transparent = true;
+    scene.add(grid);
+
+    const ifcLoader = new IFCLoader();
+    ifcLoader.ifcManager.setWasmPath("https://unpkg.com/web-ifc@0.0.46/");
+
+    function b64ToArrayBuffer(b64) {
+      const binary = atob(b64);
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    }
+
+    const ifcBuffer = b64ToArrayBuffer("__B64__");
+    const blob = new Blob([ifcBuffer], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+
+    ifcLoader.load(url, (ifcModel) => {
+      scene.add(ifcModel);
+
+      const box = new THREE.Box3().setFromObject(ifcModel);
+      const size = box.getSize(new THREE.Vector3()).length();
+      const center = box.getCenter(new THREE.Vector3());
+
+      controls.target.copy(center);
+      camera.near = size / 100;
+      camera.far = size * 10;
+      camera.updateProjectionMatrix();
+
+      camera.position.copy(center);
+      camera.position.x += size / 2.2;
+      camera.position.y += size / 3.0;
+      camera.position.z += size / 2.2;
+
+      controls.update();
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener("resize", () => {
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+  </script>
+</body>
+</html>
+"""
+    html = html.replace("__B64__", b64).replace("__HEIGHT__", str(int(height)))
+    components.html(html, height=int(height) + 20, scrolling=False)
 # ─────────────────────────────────────────────────
 st.set_page_config(
     page_title="BIM Thermal Dashboard — Md Obidul Haque",
@@ -314,24 +443,31 @@ if st.session_state.parsed_data is None:
 
     if uploaded:
         tmp_path = None
-        try:
-            with st.spinner("🔍 Parsing IFC · Extracting material layers · Calculating U-values..."):
-                with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
-                    tmp.write(uploaded.read())
-                    tmp_path = tmp.name
-                db_path = os.path.join(os.path.dirname(__file__), "thermal_database.csv")
-                thermal_db = load_thermal_database(db_path)
-                data = parse_ifc(tmp_path, thermal_db)
-                st.session_state.parsed_data = data
-                st.session_state.filename = uploaded.name
-                st.session_state.val_entered = False
-            st.rerun()
-        except Exception as e:
-            st.error(f"❌ Error parsing IFC: {e}")
-            st.info("Ensure wall assemblies have material layers defined in Revit Edit Assembly.")
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+    try:
+        ifc_bytes = uploaded.getvalue()  # ✅ keep bytes
+        st.session_state["ifc_bytes"] = ifc_bytes  # ✅ for viewer
+
+        with st.spinner("🔍 Parsing IFC · Extracting material layers · Calculating U-values..."):
+            with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
+                tmp.write(ifc_bytes)  # ✅ write the same bytes
+                tmp_path = tmp.name
+
+            db_path = os.path.join(os.path.dirname(__file__), "thermal_database.csv")
+            thermal_db = load_thermal_database(db_path)
+            data = parse_ifc(tmp_path, thermal_db)
+
+            st.session_state.parsed_data = data
+            st.session_state.filename = uploaded.name
+            st.session_state.val_entered = False
+
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"❌ Error parsing IFC: {e}")
+        st.info("Ensure wall assemblies have material layers defined in Revit Edit Assembly.")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
     st.markdown("""<div style="text-align:center;color:rgba(255,255,255,0.52);
     font-size:.78rem;margin-top:1.5rem;">
@@ -384,11 +520,12 @@ conf = get_material_confidence_summary(walls)
 with st.sidebar:
     st.markdown("---")
     if st.button("🔄 Upload New File", use_container_width=True):
-        st.session_state.parsed_data = None
-        st.session_state.filename = None
-        compute_wall_results.clear()
-        get_unique_types.clear()
-        st.rerun()
+    st.session_state.parsed_data = None
+    st.session_state.filename = None
+    st.session_state["ifc_bytes"] = None   
+    compute_wall_results.clear()
+    get_unique_types.clear()
+    st.rerun()
     st.markdown(f"""
     <div style="font-size:.74rem;color:rgba(255,255,255,0.62);margin-top:.8rem;line-height:1.55;">
     📄 {st.session_state.filename}<br>
