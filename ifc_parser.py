@@ -20,7 +20,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-from ifc_parser import parse_ifc, load_thermal_database
 from compliance import (
     CODES,
     CLIMATE_DATA,
