@@ -1330,16 +1330,16 @@ with tab6:
 # ══════════════════════════════════════════════════
 # TAB 7 — VALIDATION (Research Core)
 # ══════════════════════════════════════════════════
+# ══════════════════════════════════════════════════
+# TAB 7 — VALIDATION (Research Core)
+# ══════════════════════════════════════════════════
 with tab7:
     st.markdown('<div class="section-title">06 — VALIDATION PANEL (RESEARCH EVIDENCE)</div>',
                 unsafe_allow_html=True)
 
-    # ======================================================
-    # A) U-VALUE VALIDATION (ISO 6946)
-    # ======================================================
     st.markdown("""
     <div class="info-box">
-    🔬 <b>Research Validation Protocol (ISO 6946 — U-values):</b><br>
+    🔬 <b>Research Validation Protocol (ISO 6946):</b><br>
     1. Manually calculate U-value for each assembly in a spreadsheet using ISO 6946.<br>
     2. Enter your manual values below as independent ground truth.<br>
     3. Dashboard auto-computes MAPE, RMSE, R² — publication-ready metrics.<br>
@@ -1351,7 +1351,7 @@ with tab7:
     if not wall_results:
         st.warning("No wall data available.")
     else:
-        # Input grid (unique assembly types)
+        # Input grid
         unique_results = []
         seen_val = set()
         for wall, result in wall_results:
@@ -1376,92 +1376,96 @@ with tab7:
                     key=f"v_{wall['id']}",
                     help=f"Tool calculated: {wall['u_value']} W/m²K"
                 )
-            tool_val = float(wall["u_value"])
+            tool_val = wall["u_value"]
             diff = abs(tool_val - manual)
-            pct  = round(diff / manual * 100, 4) if manual > 0 else 0
-
-            val_pairs.append({"manual": manual, "tool": tool_val})
+            pct  = round(diff/manual*100, 4) if manual > 0 else 0
+            val_pairs.append({"manual":manual,"tool":tool_val})
             val_rows.append({
                 "Wall Assembly": wall["name"],
-                "Manual (W/m²K)": round(manual, 4),
-                "Tool (W/m²K)": round(tool_val, 4),
-                "Abs. Diff": round(diff, 6),
+                "Manual (W/m²K)": round(manual,4),
+                "Tool (W/m²K)": tool_val,
+                "Abs. Diff": round(diff,6),
                 "% Error": f"{pct:.4f}%",
-                "Agreement": ("✅ Excellent" if pct < 0.5 else
-                              "✅ Good" if pct < 2.0 else
-                              "⚠️ Review" if pct < 5.0 else "❌ Check")
+                "Agreement": ("✅ Excellent" if pct<0.5 else
+                              "✅ Good" if pct<2.0 else
+                              "⚠️ Review" if pct<5.0 else "❌ Check")
             })
 
-        st.markdown('<div class="section-title">U-VALUE COMPARISON TABLE</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">COMPARISON TABLE</div>', unsafe_allow_html=True)
         df_val = pd.DataFrame(val_rows)
         st.dataframe(df_val, use_container_width=True, hide_index=True)
-        st.download_button("⬇️ Export U-Value Validation CSV",
+        st.download_button("⬇️ Export Validation CSV",
                            df_val.to_csv(index=False),
-                           "u_value_validation_results.csv", "text/csv")
+                           "validation_results.csv", "text/csv")
 
+        # Statistical metrics — always compute and show
         stats = compute_validation_stats(val_pairs)
         if stats and "mape" in stats:
-            st.markdown('<div class="section-title">U-VALUE METRICS — FOR PAPER TABLE</div>',
+            st.markdown('<div class="section-title">STATISTICAL METRICS — FOR PAPER TABLE</div>',
                         unsafe_allow_html=True)
-            sv1, sv2, sv3, sv4, sv5 = st.columns(5)
+            sv1,sv2,sv3,sv4,sv5 = st.columns(5)
             with sv1:
                 metric_card("MAPE", f"{stats['mape']:.4f}%", "Mean Abs % Error",
-                            CT["pass"] if stats["mape"] < 2 else CT["warn"])
+                            CT["pass"] if stats["mape"]<2 else CT["warn"])
             with sv2:
                 metric_card("RMSE", f"{stats['rmse']:.6f}", "Root Mean Sq Error",
-                            CT["pass"] if stats["rmse"] < 0.01 else CT["warn"])
+                            CT["pass"] if stats["rmse"]<0.01 else CT["warn"])
             with sv3:
                 metric_card("Max Error", f"{stats['max_error_pct']:.4f}%", "Worst deviation",
-                            CT["pass"] if stats["max_error_pct"] < 2 else CT["warn"])
+                            CT["pass"] if stats["max_error_pct"]<2 else CT["warn"])
             with sv4:
                 metric_card("R²", f"{stats['r_squared']:.6f}", "Coefficient of det.",
-                            CT["pass"] if stats["r_squared"] > 0.99 else CT["warn"])
+                            CT["pass"] if stats["r_squared"]>0.99 else CT["warn"])
             with sv5:
                 verdict = "VALIDATED ✅" if stats["validated"] else "REVIEW ⚠️"
                 metric_card("Verdict", verdict, f"n = {stats['n']} types",
                             CT["pass"] if stats["validated"] else CT["warn"])
 
-            # Scatter — manual vs tool (U-values)
+            # Scatter — manual vs tool
             all_m = [p["manual"] for p in val_pairs]
             all_t = [p["tool"] for p in val_pairs]
             names_l = [r["Wall Assembly"][:22] for r in val_rows]
 
             fig_sc = go.Figure()
-            mn, mx = min(all_m + all_t) * 0.88, max(all_m + all_t) * 1.10
+            mn,mx = min(all_m+all_t)*0.88, max(all_m+all_t)*1.10
             fig_sc.add_trace(go.Scatter(
-                x=[mn, mx], y=[mn, mx], mode="lines",
-                line=dict(color=CT["warn"], dash="dash", width=1.5),
+                x=[mn,mx],y=[mn,mx],mode="lines",
+                line=dict(color=CT["warn"],dash="dash",width=1.5),
                 name="Perfect agreement (1:1)"
             ))
             fig_sc.add_trace(go.Scatter(
-                x=all_m, y=all_t, mode="markers+text",
-                marker=dict(color=CT["cyan"], size=11, opacity=0.88,
-                            line=dict(color="rgba(255,255,255,0.22)", width=1)),
-                text=names_l, textposition="top center",
-                textfont=dict(size=8, color=CT["muted"]),
+                x=all_m,y=all_t,mode="markers+text",
+                marker=dict(color=CT["cyan"],size=11,opacity=0.88,
+                            line=dict(color="rgba(255,255,255,0.22)",width=1)),
+                text=names_l,textposition="top center",
+                textfont=dict(size=8,color=CT["muted"]),
                 name="Wall assemblies",
                 hovertemplate="<b>%{text}</b><br>Manual:%{x:.4f}<br>Tool:%{y:.4f}<extra></extra>"
             ))
             sc_lay = chlayout(
-                f"Manual vs Tool — U-Value Validation (R² = {stats['r_squared']:.6f})",
+                f"Manual Calculation vs. Tool Output — R² = {stats['r_squared']:.6f}",
                 h=380, l=55, r=20, t=48, b=30
             )
             sc_lay["xaxis"]["title"] = "Manual Calculation (W/m²K)"
             sc_lay["yaxis"]["title"] = "Tool Output (W/m²K)"
-            sc_lay["xaxis"]["title_font"] = dict(size=10, color=CT["muted"])
-            sc_lay["yaxis"]["title_font"] = dict(size=10, color=CT["muted"])
+            sc_lay["xaxis"]["title_font"] = dict(size=10,color=CT["muted"])
+            sc_lay["yaxis"]["title_font"] = dict(size=10,color=CT["muted"])
             sc_lay["showlegend"] = True
-            sc_lay["legend"] = dict(font=dict(size=10, color=CT["muted"]))
+            sc_lay["legend"] = dict(font=dict(size=10,color=CT["muted"]))
             fig_sc.update_layout(**sc_lay)
             st.plotly_chart(fig_sc, use_container_width=True)
 
+            # Research statement
             st.markdown(f"""
             <div class="info-box">
-            📄 <b>Research statement (U-values):</b><br>
+            📄 <b>Research statement:</b><br>
             "The automated IFC-to-U-value pipeline was validated against independent manual ISO 6946
-            calculations across <b>{stats['n']}</b> unique wall assembly types extracted from the case study IFC file.
-            The framework achieved MAPE <b>{stats['mape']:.4f}%</b>, RMSE <b>{stats['rmse']:.6f} W/m²K</b>,
-            and R² <b>{stats['r_squared']:.6f}</b>, confirming mathematical accuracy and reproducibility."
+            calculations across <b>{stats['n']}</b> unique wall assembly types extracted from the
+            case study IFC file. The framework achieved a Mean Absolute Percentage Error (MAPE) of
+            <b>{stats['mape']:.4f}%</b>, Root Mean Square Error (RMSE) of
+            <b>{stats['rmse']:.6f} W/m²K</b>, and a coefficient of determination
+            R² = <b>{stats['r_squared']:.6f}</b>, confirming the mathematical accuracy and
+            reproducibility of the proposed automated extraction and calculation framework."
             </div>""", unsafe_allow_html=True)
 
     # ======================================================
