@@ -159,7 +159,8 @@ def ifc_viewer_ifcjs(ifc_bytes: bytes, height: int = 520):
 # ─────────────────────────────────────────────────
 st.set_page_config(
     page_title="BIM Thermal Dashboard — Md Obidul Haque",
-    page_icon="🏗️", layout="wide",
+    page_icon="🏗️",
+    layout="wide",
     initial_sidebar_state="expanded"
 )
 
