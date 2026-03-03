@@ -441,25 +441,12 @@ if st.session_state.parsed_data is None:
 
     uploaded = st.file_uploader("IFC", type=["ifc"], label_visibility="collapsed")
 
-if uploaded is not None:
+if uploaded:
     tmp_path = None
     try:
         with st.spinner("🔍 Parsing IFC · Extracting material layers · Calculating U-values..."):
-            # ✅ Always get raw bytes safely
-            try:
-                ifc_bytes = uploaded.getvalue()  # Streamlit UploadedFile supports this
-            except Exception:
-                ifc_bytes = uploaded.read()      # fallback
-
-            if not ifc_bytes:
-                raise ValueError("Uploaded IFC is empty (0 bytes). Please export again from Revit.")
-
-            # ✅ Store bytes for your 3D viewer tab
-            st.session_state["ifc_bytes"] = ifc_bytes
-
-            # ✅ Write to temp file for ifcopenshell parsing
             with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
-                tmp.write(ifc_bytes)
+                tmp.write(uploaded.read())
                 tmp_path = tmp.name
 
             db_path = os.path.join(os.path.dirname(__file__), "thermal_database.csv")
@@ -467,6 +454,24 @@ if uploaded is not None:
 
             data = parse_ifc(tmp_path, thermal_db)
 
+            # ✅ Guard: parser must return a dict
+            if data is None:
+                st.error("❌ parse_ifc() returned None. Fix ifc_parser.py so it returns a dict.")
+                st.stop()
+
+            if not isinstance(data, dict):
+                st.error(f"❌ parse_ifc() returned unexpected type: {type(data)}")
+                st.stop()
+
+            # ✅ Must contain required keys
+            required = ["summary", "walls", "windows", "roofs"]
+            missing = [k for k in required if k not in data]
+            if missing:
+                st.error(f"❌ parse_ifc() returned dict but missing keys: {missing}")
+                st.write("Returned keys:", list(data.keys()))
+                st.stop()
+
+            # ✅ Save to session
             st.session_state.parsed_data = data
             st.session_state.filename = uploaded.name
             st.session_state.val_entered = False
