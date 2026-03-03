@@ -1,0 +1,90 @@
+material_name,lambda_value,description,category
+Concrete,0.51,Normal weight concrete,Concrete
+Normal Concrete,0.51,Normal weight concrete,Concrete
+Reinforced Concrete,1.13,Reinforced concrete,Concrete
+Lightweight Concrete,0.19,Lightweight aggregate concrete,Concrete
+Aerated Concrete,0.16,Autoclaved aerated concrete,Concrete
+AAC Block,0.16,Autoclaved aerated concrete block,Concrete
+Clay Brick,0.77,Clay fired brick,Masonry
+Common Brick,0.77,Common fired clay brick,Masonry
+Facing Brick,0.77,Facing clay brick,Masonry
+Concrete Block,0.51,Hollow concrete block,Masonry
+Concrete Masonry Unit,0.51,CMU block,Masonry
+Sand Lime Brick,0.99,Calcium silicate brick,Masonry
+EPS,0.038,Expanded polystyrene insulation,Insulation
+Expanded Polystyrene,0.038,EPS insulation board,Insulation
+XPS,0.034,Extruded polystyrene insulation,Insulation
+Extruded Polystyrene,0.034,XPS insulation board,Insulation
+Mineral Wool,0.038,Mineral/rock wool insulation,Insulation
+Rock Wool,0.038,Rock wool insulation,Insulation
+Glass Wool,0.040,Glass wool insulation,Insulation
+PIR Board,0.022,Polyisocyanurate rigid foam,Insulation
+PUR,0.025,Polyurethane foam insulation,Insulation
+Polyurethane Foam,0.025,Sprayed polyurethane foam,Insulation
+Cellulose Insulation,0.040,Cellulose fibre insulation,Insulation
+Plasterboard,0.25,Gypsum plasterboard,Finish
+Gypsum Board,0.25,Gypsum plasterboard,Finish
+Gypsum Plaster,0.40,Gypsum plaster finish,Finish
+Cement Plaster,0.72,Cement sand plaster,Finish
+Render,0.72,External cement render,Finish
+Timber,0.13,Softwood timber,Timber
+Softwood,0.13,Softwood structural timber,Timber
+Hardwood,0.18,Hardwood timber,Timber
+OSB,0.13,Oriented strand board,Timber
+Plywood,0.13,Structural plywood,Timber
+Steel,50.00,Structural steel,Metal
+Aluminium,160.00,Aluminium framing,Metal
+Stainless Steel,17.00,Stainless steel,Metal
+Glass,1.00,Standard float glass,Glazing
+Double Glazing,0.18,Double glazed unit (default),Glazing
+Triple Glazing,0.12,Triple glazed unit (default),Glazing
+Air Gap,0.18,Unventilated air gap,Air
+Air Cavity,0.18,Unventilated cavity,Air
+Granite,2.80,Granite stone,Stone
+Limestone,1.30,Limestone,Stone
+Sandstone,1.80,Sandstone,Stone
+Marble,2.50,Marble,Stone
+Ceramic Tile,1.00,Ceramic floor/wall tile,Finish
+Porcelain Tile,1.30,Porcelain tile,Finish
+Screed,0.41,Sand cement screed,Concrete
+Sand Cement Screed,0.41,Sand cement screed,Concrete
+Bitumen,0.17,Bituminous waterproofing,Membrane
+EPDM,0.25,EPDM rubber membrane,Membrane
+Felt,0.19,Roofing felt,Membrane
+Default,0.50,Default unknown material,Unknown
+Metal - Steel,50.00,Revit default steel material,Metal
+Metal - Aluminium,160.00,Revit default aluminium,Metal
+Concrete Cast-in-Place,1.13,Revit cast-in-place concrete,Concrete
+Concrete Masonry,0.51,Revit concrete masonry,Concrete
+Wood - Lumber,0.13,Revit default lumber,Timber
+Wood - Sheathing,0.13,Revit wood sheathing,Timber
+Gypsum Wall Board,0.25,Revit default GWB,Finish
+Brick Common,0.77,Revit common brick,Masonry
+Masonry - Brick,0.77,Revit brick masonry,Masonry
+Insulation - Rigid,0.038,Revit rigid insulation,Insulation
+Insulation - Batt,0.040,Revit batt insulation,Insulation
+Vapor Retarder,0.17,Vapour barrier membrane,Membrane
+Air Barrier,0.17,Air barrier membrane,Membrane
+Membrane - Roofing,0.17,Roofing membrane,Membrane
+Softwood - Pine,0.13,Pine timber,Timber
+Softwood - Fir,0.13,Douglas fir timber,Timber
+Cladding - Wood,0.13,Timber cladding,Timber
+Cladding - Metal,50.00,Metal cladding panel,Metal
+Cladding - Composite,1.00,Composite cladding,Metal
+Stud Layer,0.13,Timber stud layer,Timber
+Metal Stud,50.00,Metal stud framing,Metal
+SIP Panel,0.038,Structural insulated panel,Insulation
+Cavity Insulation,0.038,Cavity wall insulation,Insulation
+Wall Insulation,0.038,General wall insulation,Insulation
+Roof Insulation,0.038,General roof insulation,Insulation
+Floor Insulation,0.040,General floor insulation,Insulation
+Fibre Cement,0.35,Fibre cement board,Finish
+Cement Board,0.35,Cement fibre board,Finish
+Hardie Board,0.35,Fibre cement cladding,Finish
+Particle Board,0.10,Particle board,Timber
+MDF,0.10,Medium density fibreboard,Timber
+Rockwool,0.038,Rock mineral wool,Insulation
+Stonewool,0.038,Stone mineral wool,Insulation
+Earth - Soil,1.50,Compacted soil,Stone
+Gravel,0.36,Gravel fill,Stone
+Hardcore,0.36,Hardcore fill,Stone
