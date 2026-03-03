@@ -4,4 +4,5 @@ pandas>=2.2.0
 numpy
 openpyxl
 matplotlib
+plotly
 pillow>=11.0.0
