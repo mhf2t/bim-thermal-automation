@@ -444,9 +444,13 @@ if st.session_state.parsed_data is None:
 if uploaded:
     tmp_path = None
     try:
+        # ✅ read bytes ONCE
+        ifc_bytes = uploaded.getvalue()
+        st.session_state["ifc_bytes"] = ifc_bytes  # ✅ for 3D viewer
+
         with st.spinner("🔍 Parsing IFC · Extracting material layers · Calculating U-values..."):
             with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
-                tmp.write(uploaded.read())
+                tmp.write(ifc_bytes)   # ✅ write same bytes to disk for parser
                 tmp_path = tmp.name
 
             db_path = os.path.join(os.path.dirname(__file__), "thermal_database.csv")
@@ -463,7 +467,6 @@ if uploaded:
                 st.error(f"❌ parse_ifc() returned unexpected type: {type(data)}")
                 st.stop()
 
-            # ✅ Must contain required keys
             required = ["summary", "walls", "windows", "roofs"]
             missing = [k for k in required if k not in data]
             if missing:
@@ -471,7 +474,6 @@ if uploaded:
                 st.write("Returned keys:", list(data.keys()))
                 st.stop()
 
-            # ✅ Save to session
             st.session_state.parsed_data = data
             st.session_state.filename = uploaded.name
             st.session_state.val_entered = False
@@ -483,7 +485,6 @@ if uploaded:
         st.info("If this is a Revit export, ensure walls/roofs have material layers (Edit Assembly) and export as IFC4.")
 
     finally:
-        # ✅ Never crash in cleanup
         if tmp_path is not None and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
