@@ -1533,7 +1533,58 @@ with tab7:
     except Exception as e:
         st.error("Validation tab crashed. Here is the exact error:")
         st.exception(e)
+            # ---------------------------
+            # PLOT: Manual vs Tool loads
+            # ---------------------------
+            try:
+                # build pairs
+                load_pairs = [
+                    {"name": "Walls",   "manual": float(man_walls), "tool": float(tool_walls)},
+                    {"name": "Roofs",   "manual": float(man_roofs), "tool": float(tool_roofs)},
+                    {"name": "Windows", "manual": float(man_wins),  "tool": float(tool_wins)},
+                    {"name": "TOTAL",   "manual": float(man_total), "tool": float(tool_total)},
+                ]
 
+                xm = [p["manual"] for p in load_pairs]
+                yt = [p["tool"] for p in load_pairs]
+                lbl = [p["name"] for p in load_pairs]
+
+                fig_q = go.Figure()
+
+                # 1:1 line
+                mn2 = min(xm + yt) * 0.90
+                mx2 = max(xm + yt) * 1.10
+                fig_q.add_trace(go.Scatter(
+                    x=[mn2, mx2], y=[mn2, mx2], mode="lines",
+                    line=dict(color=CT["warn"], dash="dash", width=1.5),
+                    name="Perfect agreement (1:1)"
+                ))
+
+                # points
+                fig_q.add_trace(go.Scatter(
+                    x=xm, y=yt, mode="markers+text",
+                    marker=dict(color=CT["cyan"], size=12, opacity=0.90,
+                                line=dict(color="rgba(255,255,255,0.22)", width=1)),
+                    text=lbl, textposition="top center",
+                    textfont=dict(size=10, color=CT["muted"]),
+                    name="Components",
+                    hovertemplate="<b>%{text}</b><br>Manual:%{x:.1f} W<br>Tool:%{y:.1f} W<extra></extra>"
+                ))
+
+                q_lay = chlayout(
+                    f"Manual vs Tool — Fabric {mode_v.capitalize()} Load (UAΔT)",
+                    h=360, l=55, r=20, t=48, b=30
+                )
+                q_lay["xaxis"]["title"] = f"Manual {mode_v.capitalize()} Load (W)"
+                q_lay["yaxis"]["title"] = f"Tool {mode_v.capitalize()} Load (W)"
+                q_lay["xaxis"]["title_font"] = dict(size=10, color=CT["muted"])
+                q_lay["yaxis"]["title_font"] = dict(size=10, color=CT["muted"])
+                fig_q.update_layout(**q_lay)
+
+                st.plotly_chart(fig_q, use_container_width=True)
+
+            except Exception as e:
+                st.warning(f"Could not draw fabric-load plot: {e}")
 # ══════════════════════════════════════════════════
 # TAB 8 — RAW DATA
 # ══════════════════════════════════════════════════
