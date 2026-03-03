@@ -519,13 +519,14 @@ conf = get_material_confidence_summary(walls)
 # Sidebar file info + reset
 with st.sidebar:
     st.markdown("---")
+
     if st.button("🔄 Upload New File", use_container_width=True):
-    st.session_state.parsed_data = None
-    st.session_state.filename = None
-    st.session_state["ifc_bytes"] = None   
-    compute_wall_results.clear()
-    get_unique_types.clear()
-    st.rerun()
+        st.session_state.parsed_data = None
+        st.session_state.filename = None
+        st.session_state["ifc_bytes"] = None
+        compute_wall_results.clear()
+        get_unique_types.clear()
+        st.rerun()
     st.markdown(f"""
     <div style="font-size:.74rem;color:rgba(255,255,255,0.62);margin-top:.8rem;line-height:1.55;">
     📄 {st.session_state.filename}<br>
