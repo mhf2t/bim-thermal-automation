@@ -1,8 +1,7 @@
-streamlit==1.32.0
+streamlit>=1.32
 ifcopenshell
-pandas==2.2.1
-numpy==1.26.4
-plotly==5.20.0
-matplotlib==3.8.3
-reportlab==4.1.0
-Pillow==10.2.0
+pandas>=2.2.0
+numpy
+openpyxl
+matplotlib
+pillow>=11.0.0
