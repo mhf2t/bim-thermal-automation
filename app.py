@@ -1529,10 +1529,7 @@ with tab7:
                 {"Component":"TOTAL","Manual (W)":man_total,"Tool (W)":tool_total},
             ])
             st.dataframe(df_load, use_container_width=True, hide_index=True)
-
-    except Exception as e:
-        st.error("Validation tab crashed. Here is the exact error:")
-        st.exception(e)
+            
             # ---------------------------
             # PLOT: Manual vs Tool loads
             # ---------------------------
