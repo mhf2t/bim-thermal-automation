@@ -463,7 +463,8 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "🏠 Overview",
     "🧱 U-Value Analysis",
     "🧮 R-Value Analysis",
     "🗺️ Facade Map",
@@ -474,6 +475,176 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📋 Raw Data"
 ])
 
+# ══════════════════════════════════════════════════
+# TAB 0 — OVERVIEW (3D + Executive Summary)
+# ══════════════════════════════════════════════════
+with tab0:
+    st.markdown('<div class="section-title">00 — MODEL OVERVIEW + KEY FINDINGS</div>', unsafe_allow_html=True)
+
+    left, right = st.columns([3, 2])
+
+    # -------------------------
+    # LEFT: 3D Viewer
+    # -------------------------
+    with left:
+        st.markdown('<div class="section-title">3D MODEL VIEW</div>', unsafe_allow_html=True)
+
+        if st.session_state.get("ifc_bytes"):
+            ifc_viewer_ifcjs(st.session_state["ifc_bytes"], height=560)
+        else:
+            st.info("3D viewer needs the uploaded IFC bytes. Re-upload once if you deployed without session state.")
+
+    # -------------------------
+    # RIGHT: KPI + Key plots
+    # -------------------------
+    with right:
+        st.markdown('<div class="section-title">EXECUTIVE KPIs</div>', unsafe_allow_html=True)
+
+        # KPIs (use what you already computed)
+        wwr = float(summary.get("overall_wwr_pct", 0) or 0)
+        total_walls = int(summary.get("total_external_walls", 0) or 0)
+        total_windows = int(summary.get("total_windows", 0) or 0)
+
+        a1, a2 = st.columns(2)
+        with a1:
+            metric_card("Overall WWR", f"{wwr:.1f}%", f"limit: {code['wwr_max_pct']}%",
+                        CT["pass"] if wwr <= code["wwr_max_pct"] else CT["fail"])
+        with a2:
+            metric_card("Unique Wall Types", str(len(unique_types)), "assemblies")
+
+        b1, b2 = st.columns(2)
+        with b1:
+            metric_card("Wall Instances", str(total_walls), "IFC walls")
+        with b2:
+            metric_card("Windows", str(total_windows), "IFC windows")
+
+        st.markdown('<div class="section-title">PASS / FAIL SNAPSHOT</div>', unsafe_allow_html=True)
+
+        # donut pass/fail of wall types
+        fig_pf = go.Figure(go.Pie(
+            labels=["Pass","Fail"],
+            values=[pass_types, fail_types],
+            hole=0.62,
+            marker=dict(colors=["rgba(52,211,153,0.88)","rgba(251,113,133,0.38)"],
+                        line=dict(color="rgba(255,255,255,0.12)",width=2)),
+            textinfo="label+percent",
+            textfont=dict(size=11,family=CT["ff"],color=CT["font"]),
+            hovertemplate="<b>%{label}</b><br>%{value} types<extra></extra>",
+        ))
+        fig_pf.add_annotation(
+            text=f"<b>{len(unique_types)}</b><br>types",
+            x=0.5,y=0.5,showarrow=False,
+            font=dict(size=14,color=CT["font"],family=CT["ff"]),align="center"
+        )
+        lay_pf = chlayout("Wall Assembly Type Compliance", h=260, l=10, r=10, t=38, b=10)
+        lay_pf["showlegend"] = True
+        lay_pf["legend"] = dict(orientation="h",x=0.5,xanchor="center",y=-0.08,
+                                font=dict(size=10,color=CT["muted"]))
+        fig_pf.update_layout(**lay_pf)
+        st.plotly_chart(fig_pf, use_container_width=True)
+
+    # -------------------------
+    # Bottom row: Key findings plots + summary table
+    # -------------------------
+    st.markdown('<div class="section-title">KEY FINDINGS (TOP ISSUES + FACADE)</div>', unsafe_allow_html=True)
+    cA, cB = st.columns([2, 2])
+
+    # A) Worst 8 wall types by U-value
+    with cA:
+        worst = []
+        seen = set()
+        for w, r in sorted(wall_results, key=lambda x: float(x[0].get("u_value") or 0), reverse=True):
+            name = w.get("name")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            worst.append((name, float(w.get("u_value") or 0), r.get("passed", False)))
+            if len(worst) >= 8:
+                break
+
+        if worst:
+            names = [x[0][:28] for x in worst][::-1]
+            vals = [x[1] for x in worst][::-1]
+            cols = [CT["pass"] if x[2] else CT["fail"] for x in worst][::-1]
+
+            fig_worst = go.Figure(go.Bar(
+                y=names, x=vals, orientation="h",
+                marker_color=cols,
+                text=[f"{v:.3f}" for v in vals],
+                textposition="outside"
+            ))
+            fig_worst.add_vline(
+                x=code["wall_u_max"], line_dash="dash", line_color=CT["warn"], line_width=2,
+                annotation_text=f"Limit: {code['wall_u_max']}",
+                annotation_font=dict(color=CT["warn"],size=10,family=CT["ff"]),
+                annotation_position="top right"
+            )
+            lay = chlayout("Worst Wall Types (Highest U-values)", h=360, l=5, r=70, t=40, b=25)
+            lay["xaxis"]["title"] = "U-Value (W/m²K)"
+            lay["showlegend"] = False
+            fig_worst.update_layout(**lay)
+            st.plotly_chart(fig_worst, use_container_width=True)
+        else:
+            st.info("No wall results available to summarize.")
+
+    # B) Facade avg U (from your tab3 logic, recompute quickly)
+    with cB:
+        orientations = ["North","South","East","West"]
+        facade_data = {}
+        for ori in orientations:
+            ow = [w for w in walls if w.get("orientation")==ori and w.get("u_value")]
+            if ow:
+                total_area = sum(w.get("area_m2",0) for w in ow) or 1
+                weighted_u = sum(float(w["u_value"]) * float(w.get("area_m2",0) or 0) for w in ow) / total_area
+                facade_data[ori] = float(weighted_u)
+            else:
+                facade_data[ori] = None
+
+        valid = [(k,v) for k,v in facade_data.items() if v is not None]
+        if valid:
+            x = [k for k,_ in valid]
+            y = [v for _,v in valid]
+            colors = [CT["pass"] if v <= code["wall_u_max"] else CT["fail"] for v in y]
+
+            fig_fac = go.Figure(go.Bar(
+                x=x, y=y, marker_color=colors,
+                text=[f"{v:.3f}" for v in y], textposition="outside"
+            ))
+            fig_fac.add_hline(
+                y=code["wall_u_max"], line_dash="dash", line_color=CT["warn"], line_width=2,
+                annotation_text=f"Limit: {code['wall_u_max']}",
+                annotation_font=dict(color=CT["warn"],size=10,family=CT["ff"])
+            )
+            layf = chlayout("Area-Weighted U by Facade (quick summary)", h=360, l=35, r=10, t=40, b=25)
+            layf["yaxis"]["title"] = "U-Value (W/m²K)"
+            layf["showlegend"] = False
+            fig_fac.update_layout(**layf)
+            st.plotly_chart(fig_fac, use_container_width=True)
+        else:
+            st.info("No facade orientation data available (check wall orientation export in Revit).")
+
+    # Executive summary table
+    st.markdown('<div class="section-title">EXECUTIVE SUMMARY TABLE</div>', unsafe_allow_html=True)
+
+    exec_rows = [{
+        "Metric": "Selected Code",
+        "Value": selected_code_name
+    },{
+        "Metric": "Overall WWR",
+        "Value": f"{wwr:.1f}% (limit {code['wwr_max_pct']}%)"
+    },{
+        "Metric": "Wall Type Compliance",
+        "Value": f"{pass_types} pass / {fail_types} fail (types)"
+    },{
+        "Metric": "Worst Wall U-value",
+        "Value": f"{max([float(w.get('u_value') or 0) for w,_ in wall_results] or [0]):.3f} W/m²K"
+    },{
+        "Metric": "Thermal Performance Index",
+        "Value": f"{tpi}/100 (Grade {tpi_grade})"
+    }]
+
+    df_exec = pd.DataFrame(exec_rows)
+    st.dataframe(df_exec, use_container_width=True, hide_index=True)
 # ══════════════════════════════════════════════════
 # TAB 1 — U-VALUE ANALYSIS
 # ══════════════════════════════════════════════════
