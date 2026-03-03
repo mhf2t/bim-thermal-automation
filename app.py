@@ -659,7 +659,7 @@ with tab0:
         if st.session_state.get("ifc_bytes"):
             ifc_viewer_ifcjs(st.session_state["ifc_bytes"], height=560)
         else:
-    st.warning("No IFC bytes found in session. Please click 'Upload New File' and upload again.")
+            st.warning("No IFC bytes found in session. Please click 'Upload New File' and upload again.")
 
     # -------------------------
     # RIGHT: KPI + Key plots
