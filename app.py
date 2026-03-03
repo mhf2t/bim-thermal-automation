@@ -441,19 +441,30 @@ if st.session_state.parsed_data is None:
 
     uploaded = st.file_uploader("IFC", type=["ifc"], label_visibility="collapsed")
 
-    if uploaded:
-        tmp_path = None
+if uploaded is not None:
+    tmp_path = None
     try:
-        ifc_bytes = uploaded.getvalue()  # ✅ keep bytes
-        st.session_state["ifc_bytes"] = ifc_bytes  # ✅ for viewer
-
         with st.spinner("🔍 Parsing IFC · Extracting material layers · Calculating U-values..."):
+            # ✅ Always get raw bytes safely
+            try:
+                ifc_bytes = uploaded.getvalue()  # Streamlit UploadedFile supports this
+            except Exception:
+                ifc_bytes = uploaded.read()      # fallback
+
+            if not ifc_bytes:
+                raise ValueError("Uploaded IFC is empty (0 bytes). Please export again from Revit.")
+
+            # ✅ Store bytes for your 3D viewer tab
+            st.session_state["ifc_bytes"] = ifc_bytes
+
+            # ✅ Write to temp file for ifcopenshell parsing
             with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
-                tmp.write(ifc_bytes)  # ✅ write the same bytes
+                tmp.write(ifc_bytes)
                 tmp_path = tmp.name
 
             db_path = os.path.join(os.path.dirname(__file__), "thermal_database.csv")
             thermal_db = load_thermal_database(db_path)
+
             data = parse_ifc(tmp_path, thermal_db)
 
             st.session_state.parsed_data = data
@@ -464,16 +475,15 @@ if st.session_state.parsed_data is None:
 
     except Exception as e:
         st.error(f"❌ Error parsing IFC: {e}")
-        st.info("Ensure wall assemblies have material layers defined in Revit Edit Assembly.")
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        st.info("If this is a Revit export, ensure walls/roofs have material layers (Edit Assembly) and export as IFC4.")
 
-    st.markdown("""<div style="text-align:center;color:rgba(255,255,255,0.52);
-    font-size:.78rem;margin-top:1.5rem;">
-    Tip: Revit → File → Export → IFC → IFC4 Reference View → ✅ Base Quantities + Psets
-    </div>""", unsafe_allow_html=True)
-    st.stop()
+    finally:
+        # ✅ Never crash in cleanup
+        if tmp_path is not None and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 # ─────────────────────────────────────────────────
 # DATA LOADED
