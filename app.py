@@ -506,7 +506,20 @@ def get_unique_types(walls_json):
             unique.append(w)
     return unique
 
-data    = st.session_state.parsed_data
+data = st.session_state.parsed_data
+
+# ✅ HARD GUARD: stop if parser did not return expected dict
+if not isinstance(data, dict):
+    st.error(f"Parser returned unexpected type: {type(data)}")
+    st.stop()
+
+required = ["summary", "walls", "windows", "roofs"]
+missing = [k for k in required if k not in data]
+if missing:
+    st.error(f"Parsed IFC data is missing keys: {missing}")
+    st.write("Available keys:", list(data.keys()))
+    st.stop()
+
 summary = data["summary"]
 walls   = data["walls"]
 windows = data["windows"]
