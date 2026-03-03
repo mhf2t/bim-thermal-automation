@@ -2,7 +2,7 @@
 app.py — BIM Thermal Envelope Dashboard (Final Research Version)
 ================================================================
 Author  : Md Obidul Haque
-Purpose : Journal publication — automated IFC thermal compliance assessment
+Purpose : Research — automated IFC thermal compliance assessment
 Method  : ISO 6946 U-value from IFC material layers (ifcopenshell)
 Codes   : MS1525:2019, ASHRAE 90.1-2019, Green Star, UK Part L 2021
 
@@ -273,7 +273,7 @@ with st.sidebar:
     <div style="font-size:.78rem;color:rgba(255,255,255,0.65);line-height:1.55;">
     Upload any IFC file from Revit.<br>U-values calculated via <b>ISO 6946</b>
     from extracted material layer data.<br><br>
-    <b>Research Tool</b> — Designed for journal publication validation.
+    <b>Research Tool</b> — Designed for bim automation.
     </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────
