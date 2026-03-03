@@ -58,10 +58,14 @@ def load_thermal_database(csv_path: str) -> pd.DataFrame:
             name_col = cols[candidate]
             break
 
-    for candidate in ["lambda", "conductivity", "k"]:
-        if candidate in cols:
-            lam_col = cols[candidate]
-            break
+    for candidate in [
+    "lambda", "lambda_value",
+    "conductivity", "k", "k_value",
+    "thermal_conductivity", "thermal_conductivity_wmk", "thermal_conductivity_w_mk"
+]:
+    if candidate in cols:
+        lam_col = cols[candidate]
+        break
 
     if not name_col or not lam_col:
         raise ValueError(
